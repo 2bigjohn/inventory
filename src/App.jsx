@@ -1199,8 +1199,186 @@ function LiquorRow({item,updL,delL,canFinance}){
   </div>);
 }
 
+// ─── GMAIL IMPORT ────────────────────────────────────────────────────────────
+function GmailImport({setPurch,show}) {
+  const [token,setToken]     = useState(null);
+  const [loading,setLoad]    = useState(false);
+  const [progress,setProg]   = useState(null);
+  const [pending,setPend]    = useState([]);
+  const [error,setErr]       = useState("");
+
+  const clientId = LS.get("bh_gclientid_v6","");
+
+  const loadGIS = cb => {
+    if (window.google?.accounts?.oauth2) { cb(); return; }
+    const s = document.createElement("script");
+    s.src = "https://accounts.google.com/gsi/client";
+    s.onload = cb;
+    s.onerror = () => setErr("Failed to load Google sign-in script");
+    document.head.appendChild(s);
+  };
+
+  const connect = () => {
+    if (!clientId) { setErr("No Google Client ID — add it in ⚙ Settings"); return; }
+    setErr("");
+    loadGIS(() => {
+      window.google.accounts.oauth2.initTokenClient({
+        client_id: clientId,
+        scope: "https://www.googleapis.com/auth/gmail.readonly",
+        callback: r => {
+          if (r.error) { setErr(r.error_description || r.error); return; }
+          setToken(r.access_token);
+          fetchEmails(r.access_token);
+        },
+      }).requestAccessToken();
+    });
+  };
+
+  const gmailFetch = (url, tok) =>
+    fetch(url, {headers:{Authorization:`Bearer ${tok}`}}).then(r=>r.json());
+
+  const extractBody = msg => {
+    const walk = parts => {
+      for (const p of parts||[]) {
+        if (p.mimeType==="text/plain" && p.body?.data)
+          return atob(p.body.data.replace(/-/g,"+").replace(/_/g,"/"));
+        if (p.parts) { const r=walk(p.parts); if(r) return r; }
+      }
+      for (const p of parts||[]) {
+        if (p.mimeType==="text/html" && p.body?.data)
+          return atob(p.body.data.replace(/-/g,"+").replace(/_/g,"/")).replace(/<[^>]+>/g," ").replace(/\s+/g," ").trim();
+      }
+      return "";
+    };
+    if (msg.payload?.parts) return walk(msg.payload.parts);
+    if (msg.payload?.body?.data) return atob(msg.payload.body.data.replace(/-/g,"+").replace(/_/g,"/"));
+    return msg.snippet||"";
+  };
+
+  const hdr = (msg,name) => msg.payload?.headers?.find(h=>h.name===name)?.value||"";
+
+  const fetchEmails = async tok => {
+    setLoad(true); setErr(""); setPend([]); setProg({stage:"Searching Gmail…",pct:10});
+    try {
+      const since = new Date(); since.setDate(since.getDate()-90);
+      const after = Math.floor(since.getTime()/1000);
+      const q = encodeURIComponent(
+        `(from:sysco OR from:usfoods OR from:"us foods" OR from:"gordon food" OR from:"restaurant depot" OR from:"performance food" OR from:shamrock OR from:"lone star" OR subject:invoice OR subject:receipt OR subject:"order confirmation" OR subject:"payment confirmation") after:${after}`
+      );
+      setProg({stage:"Searching Gmail…",pct:15});
+      const list = await gmailFetch(`https://www.googleapis.com/gmail/v1/users/me/messages?q=${q}&maxResults=40`,tok);
+      const msgs = list.messages||[];
+      if (!msgs.length) { setErr("No vendor emails found in the last 3 months."); setProg(null); setLoad(false); return; }
+
+      setProg({stage:`Found ${msgs.length} emails — reading…`,pct:25});
+      const bodies = [];
+      const limit = Math.min(msgs.length, 25);
+      for (let i=0; i<limit; i++) {
+        const msg = await gmailFetch(`https://www.googleapis.com/gmail/v1/users/me/messages/${msgs[i].id}?format=full`,tok);
+        bodies.push({
+          subject: hdr(msg,"Subject"),
+          from:    hdr(msg,"From"),
+          date:    hdr(msg,"Date"),
+          body:    extractBody(msg).slice(0,3000),
+        });
+        setProg({stage:`Reading emails… (${i+1}/${limit})`,pct:25+Math.round((i/limit)*40)});
+      }
+
+      setProg({stage:"Sending to AI…",pct:66});
+      const results = [];
+      const BATCH = 5;
+      for (let i=0; i<bodies.length; i+=BATCH) {
+        const chunk = bodies.slice(i,i+BATCH);
+        const txt = chunk.map((e,n)=>`--- Email ${n+1} ---\nFrom: ${e.from}\nDate: ${e.date}\nSubject: ${e.subject}\n${e.body}`).join("\n\n");
+        const parsed = await aiCall([{role:"user",content:`Extract purchase data from these vendor emails for Beacon Hills restaurant.\nOnly include emails that are actual invoices or payment confirmations with a dollar amount.\nReturn ONLY valid JSON:\n{"purchases":[{"vendor":"","date":"YYYY-MM-DD","amount":0,"category":"Food - Misc","invoice":"","notes":"","confidence":"high|medium|low"}]}\nCategories: ${CATS.join(", ")}\nSkip newsletters, promotions, tracking updates with no total amount.\n\n${txt}`}]);
+        if (parsed.purchases?.length) results.push(...parsed.purchases);
+        setProg({stage:"Processing with AI…",pct:66+Math.round(((i+BATCH)/bodies.length)*30)});
+      }
+
+      setProg({stage:"Done",pct:100});
+      setPend(results.filter(r=>r.amount>0).map(r=>({...r,selected:true})));
+      setTimeout(()=>setProg(null),800);
+    } catch(e) { setErr(e.message||"Failed"); setProg(null); }
+    finally { setLoad(false); }
+  };
+
+  const apply = () => {
+    const sel = pending.filter(r=>r.selected);
+    if (!sel.length) return;
+    setPurch(prev=>[...sel.map(r=>({
+      id:uid(), date:r.date||today(), vendor:r.vendor||"Unknown",
+      invoice:r.invoice||"", amount:parseFloat(r.amount)||0,
+      category:r.category||"Food - Misc", notes:r.notes||"Via Gmail",
+    })),...prev]);
+    show(`${sel.length} purchase${sel.length!==1?"s":""} imported from Gmail`);
+    setPend([]);
+  };
+
+  if (!clientId) return (
+    <div style={{background:`${C.blue}10`,border:`1px solid ${C.blue}40`,borderRadius:8,padding:16,fontFamily:mono,fontSize:11,color:C.blue,lineHeight:1.7}}>
+      ⓘ Add your <strong>Google Client ID</strong> in ⚙ Settings → AI & Integrations to enable Gmail import.
+    </div>
+  );
+
+  return (<>
+    <div style={S.card}><div style={S.hd}>
+      <span style={S.title(C.blue)}>📧 Gmail Import</span>
+      <span style={{fontFamily:mono,fontSize:10,color:C.muted}}>Last 3 months</span>
+    </div>
+    <div style={{padding:14}}>
+      <div style={{fontFamily:mono,fontSize:10,color:C.muted,lineHeight:1.7,marginBottom:12}}>Scans Gmail for vendor invoices &amp; payment confirmations and uses AI to extract and categorize each purchase.</div>
+      {!token
+        ? <button style={{...S.btn("blue"),width:"100%",justifyContent:"center",padding:"13px"}} onClick={connect} disabled={loading}>🔐 Connect Gmail</button>
+        : <button style={{...S.btn("blue"),width:"100%",justifyContent:"center",padding:"13px"}} onClick={()=>fetchEmails(token)} disabled={loading}>🔄 Re-scan Gmail</button>}
+      {loading&&<UploadProgress progress={progress} color={C.blue}/>}
+      {error&&<div style={{background:`${C.red}15`,border:`1px solid ${C.red}40`,borderRadius:6,padding:11,marginTop:12,color:C.red,fontFamily:mono,fontSize:11}}>⚠ {error}</div>}
+    </div></div>
+
+    {pending.length>0&&(
+      <div style={S.card}>
+        <div style={S.hd}>
+          <span style={S.title()}>{pending.filter(r=>r.selected).length}/{pending.length} found</span>
+          <div style={{display:"flex",gap:8}}>
+            <button style={{...S.btn("secondary"),padding:"7px 12px"}} onClick={()=>{const a=pending.every(r=>r.selected);setPend(p=>p.map(r=>({...r,selected:!a})));}}>
+              {pending.every(r=>r.selected)?"Deselect All":"Select All"}
+            </button>
+            <button style={S.btn()} onClick={apply} disabled={!pending.some(r=>r.selected)}>Apply →</button>
+          </div>
+        </div>
+        {pending.map((row,idx)=>(
+          <div key={idx} style={{padding:"10px 14px",borderBottom:`1px solid ${C.border}15`,background:row.selected?"transparent":`${C.muted}08`}}>
+            <div style={{display:"flex",alignItems:"center",gap:10}}>
+              <div onClick={()=>setPend(p=>p.map((r,i)=>i===idx?{...r,selected:!r.selected}:r))}
+                style={{width:22,height:22,borderRadius:4,border:`2px solid ${row.selected?C.amber:C.border}`,background:row.selected?C.amber:"transparent",display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",flexShrink:0,color:"#000",fontSize:13,fontWeight:700}}>
+                {row.selected&&"✓"}
+              </div>
+              <div style={{flex:1,minWidth:0}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                  <div style={{fontWeight:600,fontSize:14,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{row.vendor}</div>
+                  <div style={{fontFamily:mono,fontSize:15,fontWeight:700,color:C.amber,flexShrink:0,marginLeft:8}}>{fmt$(row.amount)}</div>
+                </div>
+                <div style={{fontFamily:mono,fontSize:10,color:C.muted,marginTop:2}}>
+                  {row.date} · {row.category}{row.invoice?` · #${row.invoice}`:""}{row.notes?` · ${row.notes}`:""}
+                </div>
+              </div>
+              <span style={{...S.badge(row.confidence==="high"?C.green:row.confidence==="medium"?C.amber:C.muted),flexShrink:0}}>
+                {row.confidence||"?"}
+              </span>
+            </div>
+          </div>
+        ))}
+        <div style={{padding:14}}>
+          <button style={{...S.btn(),width:"100%",justifyContent:"center",padding:"13px"}} onClick={apply}>
+            Import {pending.filter(r=>r.selected).length} purchase{pending.filter(r=>r.selected).length!==1?"s":""} →
+          </button>
+        </div>
+      </div>
+    )}
+  </>);
+}
+
 // ─── PURCHASES TAB ───────────────────────────────────────────────────────────
-function PurchasesTab({purchases,setPurch,items,setItems,liquor,setLiquor,priceHist,setPH,show}) {
+function PurchasesTab({purchases,setPurch,items,setItems,liquor,setLiquor,priceHist,setPH,show,canFinance}) {
   const [mode,setMode]=useState("list");
   const [form,setForm]=useState({date:today(),vendor:"Sysco",invoice:"",amount:"",category:"Food - Protein",notes:""});
   const [loading,setLoad]=useState(false); const [progress,setProgress]=useState(null); const [error,setErr]=useState(""); const [parsed,setParsed]=useState(null);
@@ -1245,7 +1423,7 @@ function PurchasesTab({purchases,setPurch,items,setItems,liquor,setLiquor,priceH
 
   return(<>
     <div style={{display:"flex",gap:8,marginBottom:12}}>
-      {[["list","History"],["manual","+ Manual"],["upload","📄 Invoice"]].map(([id,lbl])=><button key={id} style={{...S.btn(mode===id?"primary":"secondary"),flex:1,justifyContent:"center"}} onClick={()=>setMode(id)}>{lbl}</button>)}
+      {[["list","History"],["manual","+ Manual"],["upload","📄 Invoice"],["gmail","📧 Gmail"]].map(([id,lbl])=><button key={id} style={{...S.btn(mode===id?"primary":"secondary"),flex:"1 1 0",justifyContent:"center",padding:"9px 4px",fontSize:10}} onClick={()=>setMode(id)}>{lbl}</button>)}
     </div>
 
     {mode==="manual"&&(<div style={S.card}><div style={S.hd}><span style={S.title()}>Add Purchase</span></div>
@@ -1285,6 +1463,8 @@ function PurchasesTab({purchases,setPurch,items,setItems,liquor,setLiquor,priceH
         <button style={{...S.btn(),width:"100%",justifyContent:"center"}} onClick={applyInv}>Apply — Log + Update Costs</button>
       </div>)}
     </div>)}
+
+    {mode==="gmail"&&<GmailImport setPurch={setPurch} show={show}/>}
 
     {mode==="list"&&(<>
       <div style={{display:"flex",gap:10,marginBottom:12}}>
@@ -1677,6 +1857,8 @@ function SettingsTab({settings,setSettings,items,setItems,liquor,setLiquor,purch
   const RC=ROLE_COLOR;
   const [apiKey,setApiKey]=useState(()=>LS.get("bh_apikey_v6",""));
   const saveKey=()=>{LS.set("bh_apikey_v6",apiKey);show("API key saved");};
+  const [gClientId,setGClientId]=useState(()=>LS.get("bh_gclientid_v6",""));
+  const saveGId=()=>{LS.set("bh_gclientid_v6",gClientId);show("Google Client ID saved");};
 
   const saveUser=()=>{
     if(!uf.name.trim())return;
@@ -1706,6 +1888,15 @@ function SettingsTab({settings,setSettings,items,setItems,liquor,setLiquor,purch
           </div>
         </div>
         {apiKey&&<div style={{fontFamily:mono,fontSize:10,color:C.green}}>✓ Key configured</div>}
+        <div style={{marginTop:8,paddingTop:12,borderTop:`1px solid ${C.border}`}}>
+          <div style={S.lbl}>GOOGLE CLIENT ID (for Gmail import)</div>
+          <div style={{display:"flex",gap:8,marginTop:4}}>
+            <input style={{...S.inp,flex:1,fontFamily:mono,fontSize:11}} value={gClientId} onChange={e=>setGClientId(e.target.value)} placeholder="000000000000-xxx.apps.googleusercontent.com"/>
+            <button style={{...S.btn("blue"),padding:"9px 16px"}} onClick={saveGId}>Save</button>
+          </div>
+          {gClientId&&<div style={{fontFamily:mono,fontSize:10,color:C.green,marginTop:4}}>✓ Google Client ID configured</div>}
+          <div style={{fontFamily:mono,fontSize:9,color:C.muted,marginTop:6,lineHeight:1.6}}>Get one free at console.cloud.google.com → APIs → Gmail API → OAuth 2.0 credentials. Add <strong style={{color:C.amber}}>https://2bigjohn.github.io</strong> as an authorized JS origin.</div>
+        </div>
       </div>
     </div>
     <div style={S.card}><div style={S.hd}><span style={S.title()}>Cost Targets</span></div>
