@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from "react";
 
-// ─── Palette ──────────────────────────────────────────────────────────────────
+// ─── Palette v2 ───────────────────────────────────────────────────────────────
 const C = {
   bg:"#0f1117", surface:"#1a1d27", surfaceAlt:"#22263a", border:"#2e3248",
   amber:"#f0a500", green:"#22c55e", red:"#ef4444", muted:"#6b7280",
