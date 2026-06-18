@@ -24,8 +24,8 @@ jobs:
         run: touch dist/.nojekyll
       - name: Push built files to gh-pages branch
         run: |
-          git config user.name "Claude"
-          git config user.email "noreply@anthropic.com"
+          git config --global user.name "Claude"
+          git config --global user.email "noreply@anthropic.com"
           cd dist
           git init
           git add -A
