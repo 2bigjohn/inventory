@@ -1208,8 +1208,9 @@ function GmailImport({setPurch,show}) {
   const [pending,setPend]    = useState([]);
   const [error,setErr]       = useState("");
 
-  const clientId  = LS.get("bh_gclientid_v6","");
-  const androidId = LS.get("bh_gclientid_android","");
+  const clientId       = LS.get("bh_gclientid_v6","");
+  const androidId      = LS.get("bh_gclientid_android","");
+  const androidSecret  = LS.get("bh_gclientsecret_android","");
 
   // Google requires the reverse client-ID scheme for Desktop/native app OAuth
   const buildAndroidRedirect = id => {
@@ -1253,10 +1254,13 @@ function GmailImport({setPurch,show}) {
         const oauthErr = url.searchParams.get("error");
         if (oauthErr) { setErr(oauthErr); return; }
         if (!code) { setErr("No authorization code received"); return; }
+        const secret = androidSecret;
+        const tokenParams = { client_id:id, code, code_verifier:verifier,
+          grant_type:"authorization_code", redirect_uri:redirectUri };
+        if (secret) tokenParams.client_secret = secret;
         const resp = await fetch("https://oauth2.googleapis.com/token", {
           method:"POST", headers:{"Content-Type":"application/x-www-form-urlencoded"},
-          body: new URLSearchParams({ client_id:id, code, code_verifier:verifier,
-            grant_type:"authorization_code", redirect_uri:redirectUri }),
+          body: new URLSearchParams(tokenParams),
         });
         const td = await resp.json();
         if (td.error) { setErr(td.error_description||td.error); return; }
@@ -1920,6 +1924,8 @@ function SettingsTab({settings,setSettings,items,setItems,liquor,setLiquor,purch
   const saveGId=()=>{LS.set("bh_gclientid_v6",gClientId);show("Google Client ID saved");};
   const [gAndroidId,setGAndroidId]=useState(()=>LS.get("bh_gclientid_android",""));
   const saveGAndroidId=()=>{LS.set("bh_gclientid_android",gAndroidId);show("Android Client ID saved");};
+  const [gAndroidSecret,setGAndroidSecret]=useState(()=>LS.get("bh_gclientsecret_android",""));
+  const saveGAndroidSecret=()=>{LS.set("bh_gclientsecret_android",gAndroidSecret);show("Android Client Secret saved");};
 
   const saveUser=()=>{
     if(!uf.name.trim())return;
@@ -1965,7 +1971,16 @@ function SettingsTab({settings,setSettings,items,setItems,liquor,setLiquor,purch
             <button style={{...S.btn("blue"),padding:"9px 16px"}} onClick={saveGAndroidId}>Save</button>
           </div>
           {gAndroidId&&<div style={{fontFamily:mono,fontSize:10,color:C.green,marginTop:4}}>✓ Android Client ID configured</div>}
-          <div style={{fontFamily:mono,fontSize:9,color:C.muted,marginTop:6,lineHeight:1.6}}>Create a <strong style={{color:C.amber}}>Desktop app</strong> type OAuth client in Google Cloud Console. Add redirect URI: <strong style={{color:C.amber}}>com.beaconhills.inventory:/oauth2callback</strong></div>
+          <div style={{fontFamily:mono,fontSize:9,color:C.muted,marginTop:6,lineHeight:1.6}}>Create a <strong style={{color:C.amber}}>Desktop app</strong> type OAuth client in Google Cloud Console. No redirect URI needed.</div>
+        </div>
+        <div style={{marginTop:8,paddingTop:12,borderTop:`1px solid ${C.border}`}}>
+          <div style={S.lbl}>ANDROID CLIENT SECRET</div>
+          <div style={{display:"flex",gap:8,marginTop:4}}>
+            <input style={{...S.inp,flex:1,fontFamily:mono,fontSize:11}} type="password" value={gAndroidSecret} onChange={e=>setGAndroidSecret(e.target.value)} placeholder="GOCSPX-…"/>
+            <button style={{...S.btn("blue"),padding:"9px 16px"}} onClick={saveGAndroidSecret}>Save</button>
+          </div>
+          {gAndroidSecret&&<div style={{fontFamily:mono,fontSize:10,color:C.green,marginTop:4}}>✓ Client Secret configured</div>}
+          <div style={{fontFamily:mono,fontSize:9,color:C.muted,marginTop:6,lineHeight:1.6}}>From the same Desktop app client page — click <strong style={{color:C.amber}}>Download JSON</strong> or copy the secret directly from the credentials page.</div>
         </div>
       </div>
     </div>
