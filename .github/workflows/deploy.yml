@@ -3,7 +3,7 @@ on:
   push:
     branches: [main]
 permissions:
-  contents: read
+  contents: write
   pages: write
   id-token: write
 concurrency:
@@ -11,7 +11,6 @@ concurrency:
   cancel-in-progress: true
 jobs:
   build-and-deploy:
-    environment: deployment
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -21,11 +20,22 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run build
-      - uses: actions/configure-pages@v5
-        with:
-          enablement: true
-      - uses: actions/upload-pages-artifact@v3
-        with:
-          path: dist
-      - uses: actions/deploy-pages@v4
-        id: deployment
+      - name: Add .nojekyll to skip Jekyll processing
+        run: touch dist/.nojekyll
+      - name: Push built files to gh-pages branch
+        run: |
+          git config user.name "Claude"
+          git config user.email "noreply@anthropic.com"
+          cd dist
+          git init
+          git add -A
+          git commit -m "Deploy built app"
+          git push --force "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" HEAD:gh-pages
+      - name: Set GitHub Pages source to gh-pages branch
+        run: |
+          curl -s -X PATCH \
+            -H "Authorization: Bearer ${{ github.token }}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${{ github.repository }}/pages" \
+            -d '{"source":{"branch":"gh-pages","path":"/"}}' | cat
