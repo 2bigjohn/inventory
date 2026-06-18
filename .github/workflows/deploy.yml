@@ -2,33 +2,16 @@ name: Deploy to GitHub Pages
 on:
   push:
     branches: [main]
+permissions:
+  contents: read
+  pages: write
+  id-token: write
 concurrency:
   group: deploy-${{ github.ref }}
   cancel-in-progress: true
 jobs:
-  unlock-environment:
-    runs-on: ubuntu-latest
-    permissions:
-      administration: write
-    steps:
-      - name: Allow all branches to deploy to github-pages environment
-        run: |
-          curl -s -X PUT \
-            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${{ github.repository }}/environments/github-pages" \
-            -d '{"deployment_branch_policy":null}' | \
-            python3 -c "import sys,json; d=json.load(sys.stdin); print('OK:', d.get('name','?'))" || echo "Note: environment update failed (may already be unrestricted)"
-
   build-and-deploy:
-    needs: unlock-environment
-    permissions:
-      contents: read
-      pages: write
-      id-token: write
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+    environment: deployment
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
