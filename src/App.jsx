@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect } from "react";
+import { Capacitor } from "@capacitor/core";
 
 // ─── Palette v2 ───────────────────────────────────────────────────────────────
 const C = {
@@ -1207,32 +1208,84 @@ function GmailImport({setPurch,show}) {
   const [pending,setPend]    = useState([]);
   const [error,setErr]       = useState("");
 
-  const clientId = LS.get("bh_gclientid_v6","");
+  const clientId    = LS.get("bh_gclientid_v6","");
+  const androidId   = LS.get("bh_gclientid_android","");
+  const ANDROID_REDIRECT = "com.beaconhills.inventory:/oauth2callback";
 
-  const loadGIS = cb => {
-    if (window.google?.accounts?.oauth2) { cb(); return; }
-    const s = document.createElement("script");
-    s.src = "https://accounts.google.com/gsi/client";
-    s.onload = cb;
-    s.onerror = () => setErr("Failed to load Google sign-in script");
-    document.head.appendChild(s);
+  // PKCE helpers for Android OAuth flow
+  const pkceVerifier = () => {
+    const a = new Uint8Array(32);
+    crypto.getRandomValues(a);
+    return btoa(String.fromCharCode(...a)).replace(/\+/g,"-").replace(/\//g,"_").replace(/=/g,"");
+  };
+  const pkceChallenge = async v => {
+    const d = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(v));
+    return btoa(String.fromCharCode(...new Uint8Array(d))).replace(/\+/g,"-").replace(/\//g,"_").replace(/=/g,"");
   };
 
-  const connect = () => {
+  const connectAndroid = async () => {
+    const id = androidId || clientId;
+    if (!id) { setErr("No Google Client ID — add it in ⚙ Settings"); return; }
+    setErr("");
+    const { Browser } = await import("@capacitor/browser");
+    const { App: CapApp } = await import("@capacitor/app");
+    const verifier = pkceVerifier();
+    const challenge = await pkceChallenge(verifier);
+    const params = new URLSearchParams({
+      client_id: id, redirect_uri: ANDROID_REDIRECT,
+      response_type: "code",
+      scope: "https://www.googleapis.com/auth/gmail.readonly",
+      code_challenge: challenge, code_challenge_method: "S256",
+      access_type: "online",
+    });
+    const listener = await CapApp.addListener("appUrlOpen", async ev => {
+      await listener.remove();
+      await Browser.close().catch(()=>{});
+      try {
+        const url = new URL(ev.url);
+        const code = url.searchParams.get("code");
+        const oauthErr = url.searchParams.get("error");
+        if (oauthErr) { setErr(oauthErr); return; }
+        if (!code) { setErr("No authorization code received"); return; }
+        const resp = await fetch("https://oauth2.googleapis.com/token", {
+          method:"POST", headers:{"Content-Type":"application/x-www-form-urlencoded"},
+          body: new URLSearchParams({ client_id:id, code, code_verifier:verifier,
+            grant_type:"authorization_code", redirect_uri:ANDROID_REDIRECT }),
+        });
+        const td = await resp.json();
+        if (td.error) { setErr(td.error_description||td.error); return; }
+        setToken(td.access_token);
+        fetchEmails(td.access_token);
+      } catch(e) { setErr(e.message||"Authentication failed"); }
+    });
+    await Browser.open({ url:`https://accounts.google.com/o/oauth2/v2/auth?${params}` });
+  };
+
+  const connectWeb = () => {
     if (!clientId) { setErr("No Google Client ID — add it in ⚙ Settings"); return; }
     setErr("");
+    const loadGIS = cb => {
+      if (window.google?.accounts?.oauth2) { cb(); return; }
+      const s = document.createElement("script");
+      s.src = "https://accounts.google.com/gsi/client";
+      s.onload = cb;
+      s.onerror = () => setErr("Failed to load Google sign-in script");
+      document.head.appendChild(s);
+    };
     loadGIS(() => {
       window.google.accounts.oauth2.initTokenClient({
         client_id: clientId,
         scope: "https://www.googleapis.com/auth/gmail.readonly",
         callback: r => {
-          if (r.error) { setErr(r.error_description || r.error); return; }
+          if (r.error) { setErr(r.error_description||r.error); return; }
           setToken(r.access_token);
           fetchEmails(r.access_token);
         },
       }).requestAccessToken();
     });
   };
+
+  const connect = () => Capacitor.isNativePlatform() ? connectAndroid() : connectWeb();
 
   const gmailFetch = (url, tok) =>
     fetch(url, {headers:{Authorization:`Bearer ${tok}`}}).then(r=>r.json());
@@ -1859,6 +1912,8 @@ function SettingsTab({settings,setSettings,items,setItems,liquor,setLiquor,purch
   const saveKey=()=>{LS.set("bh_apikey_v6",apiKey);show("API key saved");};
   const [gClientId,setGClientId]=useState(()=>LS.get("bh_gclientid_v6",""));
   const saveGId=()=>{LS.set("bh_gclientid_v6",gClientId);show("Google Client ID saved");};
+  const [gAndroidId,setGAndroidId]=useState(()=>LS.get("bh_gclientid_android",""));
+  const saveGAndroidId=()=>{LS.set("bh_gclientid_android",gAndroidId);show("Android Client ID saved");};
 
   const saveUser=()=>{
     if(!uf.name.trim())return;
@@ -1896,6 +1951,15 @@ function SettingsTab({settings,setSettings,items,setItems,liquor,setLiquor,purch
           </div>
           {gClientId&&<div style={{fontFamily:mono,fontSize:10,color:C.green,marginTop:4}}>✓ Google Client ID configured</div>}
           <div style={{fontFamily:mono,fontSize:9,color:C.muted,marginTop:6,lineHeight:1.6}}>Get one free at console.cloud.google.com → APIs → Gmail API → OAuth 2.0 credentials. Add <strong style={{color:C.amber}}>https://2bigjohn.github.io</strong> as an authorized JS origin.</div>
+        </div>
+        <div style={{marginTop:8,paddingTop:12,borderTop:`1px solid ${C.border}`}}>
+          <div style={S.lbl}>ANDROID CLIENT ID (for Gmail on Android app)</div>
+          <div style={{display:"flex",gap:8,marginTop:4}}>
+            <input style={{...S.inp,flex:1,fontFamily:mono,fontSize:11}} value={gAndroidId} onChange={e=>setGAndroidId(e.target.value)} placeholder="000000000000-xxx.apps.googleusercontent.com"/>
+            <button style={{...S.btn("blue"),padding:"9px 16px"}} onClick={saveGAndroidId}>Save</button>
+          </div>
+          {gAndroidId&&<div style={{fontFamily:mono,fontSize:10,color:C.green,marginTop:4}}>✓ Android Client ID configured</div>}
+          <div style={{fontFamily:mono,fontSize:9,color:C.muted,marginTop:6,lineHeight:1.6}}>Create a <strong style={{color:C.amber}}>Desktop app</strong> type OAuth client in Google Cloud Console. Add redirect URI: <strong style={{color:C.amber}}>com.beaconhills.inventory:/oauth2callback</strong></div>
         </div>
       </div>
     </div>
