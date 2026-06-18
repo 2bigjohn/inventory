@@ -1208,9 +1208,14 @@ function GmailImport({setPurch,show}) {
   const [pending,setPend]    = useState([]);
   const [error,setErr]       = useState("");
 
-  const clientId    = LS.get("bh_gclientid_v6","");
-  const androidId   = LS.get("bh_gclientid_android","");
-  const ANDROID_REDIRECT = "com.beaconhills.inventory:/oauth2callback";
+  const clientId  = LS.get("bh_gclientid_v6","");
+  const androidId = LS.get("bh_gclientid_android","");
+
+  // Google requires the reverse client-ID scheme for Desktop/native app OAuth
+  const buildAndroidRedirect = id => {
+    const prefix = id.replace(".apps.googleusercontent.com","");
+    return `com.googleusercontent.apps.${prefix}:/oauth2redirect`;
+  };
 
   // PKCE helpers for Android OAuth flow
   const pkceVerifier = () => {
@@ -1227,12 +1232,13 @@ function GmailImport({setPurch,show}) {
     const id = androidId || clientId;
     if (!id) { setErr("No Google Client ID — add it in ⚙ Settings"); return; }
     setErr("");
+    const redirectUri = buildAndroidRedirect(id);
     const { Browser } = await import("@capacitor/browser");
     const { App: CapApp } = await import("@capacitor/app");
     const verifier = pkceVerifier();
     const challenge = await pkceChallenge(verifier);
     const params = new URLSearchParams({
-      client_id: id, redirect_uri: ANDROID_REDIRECT,
+      client_id: id, redirect_uri: redirectUri,
       response_type: "code",
       scope: "https://www.googleapis.com/auth/gmail.readonly",
       code_challenge: challenge, code_challenge_method: "S256",
@@ -1250,7 +1256,7 @@ function GmailImport({setPurch,show}) {
         const resp = await fetch("https://oauth2.googleapis.com/token", {
           method:"POST", headers:{"Content-Type":"application/x-www-form-urlencoded"},
           body: new URLSearchParams({ client_id:id, code, code_verifier:verifier,
-            grant_type:"authorization_code", redirect_uri:ANDROID_REDIRECT }),
+            grant_type:"authorization_code", redirect_uri:redirectUri }),
         });
         const td = await resp.json();
         if (td.error) { setErr(td.error_description||td.error); return; }

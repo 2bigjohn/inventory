@@ -26,7 +26,7 @@
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
-                <data android:scheme="com.beaconhills.inventory" />
+                <data android:scheme="com.googleusercontent.apps.326188122408-ut2h6tudoc5ctst9o2eu092fes3l7445" />
             </intent-filter>
 
         </activity>
