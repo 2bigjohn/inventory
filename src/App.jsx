@@ -18,9 +18,41 @@ const KEYS = {
   recipes:`bh_recipes_${V}`, settings:`bh_settings_${V}`, users:`bh_users_${V}`,
   sales:`bh_sales_${V}`,
 };
+
+// Preferences is lazy-imported so web builds don't bundle it
+let _prefs = null;
+const getPrefs = () => _prefs || (_prefs = Capacitor.isNativePlatform()
+  ? import("@capacitor/preferences").then(m => m.Preferences).catch(() => null)
+  : Promise.resolve(null));
+
 const LS = {
   get: (k, fb) => { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : fb; } catch { return fb; } },
-  set: (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} },
+  set: (k, v) => {
+    try { localStorage.setItem(k, JSON.stringify(v)); } catch {}
+    // async backup to Capacitor Preferences on native (fire-and-forget)
+    if (Capacitor.isNativePlatform()) {
+      getPrefs().then(p => p?.set({ key:k, value:JSON.stringify(v) })).catch(()=>{});
+    }
+  },
+  // Called once at startup on native: if localStorage is empty, restore from Preferences
+  restore: async () => {
+    if (!Capacitor.isNativePlatform()) return false;
+    const p = await getPrefs();
+    if (!p) return false;
+    const hasLocal = Object.values(KEYS).some(k => localStorage.getItem(k));
+    if (hasLocal) return false; // already loaded, nothing to restore
+    let restored = false;
+    for (const k of Object.values(KEYS)) {
+      const { value } = await p.get({ key: k });
+      if (value) { localStorage.setItem(k, value); restored = true; }
+    }
+    // also restore settings that live outside KEYS
+    for (const k of ["bh_apikey_v6","bh_gclientid_v6","bh_gclientid_android","bh_gclientsecret_android"]) {
+      const { value } = await p.get({ key: k });
+      if (value) localStorage.setItem(k, value);
+    }
+    return restored;
+  },
 };
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -345,7 +377,27 @@ function LoginScreen({ onLogin }) {
 }
 
 // ─── ROOT APP ─────────────────────────────────────────────────────────────────
+// Shell handles the one-time async Preferences restore on native Android.
+// Once ready it renders AppInner, which initialises all state from localStorage
+// (which by then has been populated from Preferences if needed).
 export default function App() {
+  const [storeReady, setStoreReady] = useState(!Capacitor.isNativePlatform());
+  useEffect(() => {
+    if (storeReady) return;
+    LS.restore().then(restored => {
+      if (restored) window.location.reload();
+      else setStoreReady(true);
+    });
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  if (!storeReady) return (
+    <div style={{background:C.bg,height:"100dvh",display:"flex",alignItems:"center",justifyContent:"center"}}>
+      <div style={{fontFamily:mono,fontSize:12,color:C.amber,letterSpacing:3}}>LOADING…</div>
+    </div>
+  );
+  return <AppInner />;
+}
+
+function AppInner() {
   const [currentUser, setCurrentUser] = useState(null);
   const [tab,  setTab]    = useState("home");
   const [items,    setItems]    = useState(() => LS.get(KEYS.items,    []));
@@ -362,7 +414,7 @@ export default function App() {
   const [toast,    setToast]    = useState("");
   const [sales,    setSales]    = useState(()=>LS.get(KEYS.sales,0));
 
-  // All persist effects BEFORE auth gate
+  // All persist effects — write to localStorage AND async-backup to Preferences
   useEffect(() => LS.set(KEYS.items,    items),    [items]);
   useEffect(() => LS.set(KEYS.purchases,purchases),[purchases]);
   useEffect(() => LS.set(KEYS.scans,    scans),    [scans]);
@@ -2122,6 +2174,46 @@ function SettingsTab({settings,setSettings,items,setItems,liquor,setLiquor,purch
     show("Cleared");setCC(null);
   };
 
+  const exportData=()=>{
+    const payload=JSON.stringify({
+      _version:V, _exported:new Date().toISOString(),
+      items,purchases,walks,liquor,priceHist,scans,snaps,waste,recipes,settings,
+      apiKey:LS.get("bh_apikey_v6",""),
+      gClientId:LS.get("bh_gclientid_v6",""),
+      gAndroidId:LS.get("bh_gclientid_android",""),
+    },null,2);
+    const name=`beacon-hills-backup-${new Date().toISOString().slice(0,10)}.json`;
+    const a=Object.assign(document.createElement("a"),{href:URL.createObjectURL(new Blob([payload],{type:"application/json"})),download:name});
+    a.click(); URL.revokeObjectURL(a.href);
+    show("Backup exported");
+  };
+
+  const importData=e=>{
+    const f=e.target.files?.[0]; if(!f)return;
+    const r=new FileReader();
+    r.onload=ev=>{
+      try{
+        const d=JSON.parse(ev.target.result);
+        if(d.items)setItems(d.items);
+        if(d.purchases)setPurch(d.purchases);
+        if(d.walks)setWalks(d.walks);
+        if(d.liquor)setLiquor(d.liquor);
+        if(d.priceHist)setPH(d.priceHist);
+        if(d.scans)setScans(d.scans);
+        if(d.snaps)setSnaps(d.snaps);
+        if(d.waste)setWaste(d.waste);
+        if(d.recipes)setRecipes(d.recipes);
+        if(d.settings)setSettings(d.settings);
+        if(d.apiKey){LS.set("bh_apikey_v6",d.apiKey);setApiKey(d.apiKey);}
+        if(d.gClientId){LS.set("bh_gclientid_v6",d.gClientId);setGClientId(d.gClientId);}
+        if(d.gAndroidId){LS.set("bh_gclientid_android",d.gAndroidId);setGAndroidId(d.gAndroidId);}
+        show(`Backup restored (${new Date(d._exported||0).toLocaleDateString()})`);
+      }catch{show("Could not read backup file");}
+    };
+    r.readAsText(f);
+    e.target.value="";
+  };
+
   return(<>
     <div style={S.card}><div style={S.hd}><span style={S.title()}>Restaurant</span></div>
       <div style={{padding:14,display:"grid",gap:10}}>
@@ -2208,6 +2300,23 @@ function SettingsTab({settings,setSettings,items,setItems,liquor,setLiquor,purch
       ))}
       <div style={{padding:"10px 14px",fontFamily:mono,fontSize:10,color:C.muted,lineHeight:1.7}}>
         <strong style={{color:C.text}}>Admin</strong> — full access · <strong style={{color:C.blue}}>Manager</strong> — no settings · <strong style={{color:C.green}}>Counter</strong> — count/scan only
+      </div>
+    </div>)}
+    {role==="admin"&&(<div style={S.card}><div style={S.hd}><span style={S.title(C.green)}>Backup & Restore</span></div>
+      <div style={{padding:14,display:"grid",gap:10}}>
+        <div style={{fontFamily:mono,fontSize:10,color:C.muted,lineHeight:1.7}}>Export all data to a JSON file for safekeeping or moving to another device. Import to restore a previous backup.</div>
+        <button style={{...S.btn("primary"),width:"100%",justifyContent:"center",padding:"11px"}} onClick={exportData}>
+          ↓ Export Backup
+        </button>
+        <label style={{...S.btn("secondary"),width:"100%",justifyContent:"center",padding:"11px",cursor:"pointer"}}>
+          ↑ Import Backup
+          <input type="file" accept=".json,application/json" style={{display:"none"}} onChange={importData}/>
+        </label>
+        {Capacitor.isNativePlatform()&&(
+          <div style={{fontFamily:mono,fontSize:9,color:C.muted,lineHeight:1.7,marginTop:4}}>
+            On Android all data is also automatically backed up to device storage and restored if the app's cache is ever cleared.
+          </div>
+        )}
       </div>
     </div>)}
     {role==="admin"&&(<div style={S.card}><div style={S.hd}><span style={S.title(C.red)}>Clear Data</span></div>
