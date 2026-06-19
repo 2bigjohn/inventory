@@ -70,6 +70,20 @@ const uid    = () => `${Date.now()}-${Math.random().toString(36).slice(2,6)}`;
 const today  = () => new Date().toISOString().slice(0,10);
 const b64    = f  => new Promise((res,rej) => { const r=new FileReader(); r.onload=()=>res(r.result.split(",")[1]); r.onerror=rej; r.readAsDataURL(f); });
 
+// On Android, file.type is often empty — derive it from the extension instead
+const imgExts = /\.(jpe?g|png|gif|webp|heic|heif)$/i;
+const fileMediaType = f => {
+  if (f.type) return f.type;
+  const ext = f.name.split(".").pop().toLowerCase();
+  return {jpg:"image/jpeg",jpeg:"image/jpeg",png:"image/png",gif:"image/gif",
+          webp:"image/webp",heic:"image/heic",heif:"image/heif",pdf:"application/pdf"}[ext] || "application/octet-stream";
+};
+const fileIsImg = f => fileMediaType(f).startsWith("image/") || imgExts.test(f.name);
+const aiContent = (f, d64) => ({
+  type: fileIsImg(f) ? "image" : "document",
+  source: { type:"base64", media_type: fileMediaType(f), data: d64 },
+});
+
 function autoAssign(itemList, walks) {
   const updated = walks.map(w => ({...w, itemIds:[...w.itemIds]}));
   itemList.forEach(item => {
@@ -801,11 +815,10 @@ function ScanTab({items,setItems,walks,setWalks,scans,setScans,show}) {
     setLoad(true); setErr(""); setResult(null); setPend([]); setDW([]); setProgress({stage:"Reading file…",pct:15,sub:file.name});
     try {
       const d64 = await b64(file); setProgress({stage:"Sending to AI…",pct:35,sub:"Analyzing count sheet"});
-      const isImg = file.type.startsWith("image/");
       const existing = items.map(i=>i.name).join(", ");
       setProgress({stage:"AI reading sheet…",pct:55,sub:"Extracting items & locations"});
       const parsed = await aiCall([{role:"user",content:[
-        {type:isImg?"image":"document",source:{type:"base64",media_type:file.type,data:d64}},
+        aiContent(file,d64),
         {type:"text",text:`Read this restaurant inventory count sheet. Extract every line item AND any storage location sections.\n\nExisting items: ${existing||"none"}\n\nReturn ONLY valid JSON:\n{"locations":[{"name":"string","items":["item name"]}],"items":[{"name":"string","qty":0,"unit":"lb","matchExisting":false,"existingName":"","guessedCategory":"Food - Protein","location":""}],"hasLocations":true,"notes":"string"}\n\nRules: unit=ea/lb/oz/cs/bt/gal/qt/bag/box/can. guessedCategory must be one of: Food - Protein, Food - Produce, Food - Dairy, Food - Dry, Food - Frozen, Food - Misc, Beverage - NA, Liquor, Beer, Wine, Supplies, Other. Extract ALL items, qty=0 if blank. matchExisting=true if close name match.`},
       ]}]);
       setProgress({stage:"Matching existing items…",pct:85,sub:"Building review list"});
@@ -985,12 +998,12 @@ function LiquorTab({liquor,setLiquor,show,bevSales,setBevSales,lqTotals,settings
   const processFile=async file=>{
     setLoad(true);setErr("");setPend([]);setProgress({stage:"Reading file…",pct:15,sub:file.name});
     try{
-      const d64=await b64(file); const isImg=file.type.startsWith("image/"); setProgress({stage:"Sending to AI…",pct:40,sub:"Analyzing bar sheet"});
+      const d64=await b64(file); setProgress({stage:"Sending to AI…",pct:40,sub:"Analyzing bar sheet"});
       const isCSV=file.name.endsWith(".csv")||file.type==="text/csv";
       const known=liquor.map(l=>l.name).join(", ");
       let msgs;
       if(isCSV){const text=await file.text();msgs=[{role:"user",content:[{type:"text",text:`Parse liquor inventory CSV.\nKnown items: ${known||"none"}\nCSV:\n${text.slice(0,6000)}\nReturn ONLY JSON:\n{"items":[{"name":"","category":"Spirits","subType":"Whiskey","bottleSize":"750mL","qty":0,"unitCost":0,"matchExisting":false,"existingName":""}],"notes":""}\ncategory: Spirits/Beer/Wine/NA Bev`}]}];}
-      else{msgs=[{role:"user",content:[{type:isImg?"image":"document",source:{type:"base64",media_type:file.type,data:d64}},{type:"text",text:`Parse this liquor inventory for a restaurant bar.\nKnown items: ${known||"none"}\nReturn ONLY valid JSON:\n{"items":[{"name":"","category":"Spirits","subType":"Whiskey","bottleSize":"750mL","qty":0,"unitCost":0,"matchExisting":false,"existingName":""}],"notes":""}\ncategory: Spirits/Beer/Wine/NA Bev. qty uses tenths for spirits (2.7=2 full+7/10).`}]}];}
+      else{msgs=[{role:"user",content:[aiContent(file,d64),{type:"text",text:`Parse this liquor inventory for a restaurant bar.\nKnown items: ${known||"none"}\nReturn ONLY valid JSON:\n{"items":[{"name":"","category":"Spirits","subType":"Whiskey","bottleSize":"750mL","qty":0,"unitCost":0,"matchExisting":false,"existingName":""}],"notes":""}\ncategory: Spirits/Beer/Wine/NA Bev. qty uses tenths for spirits (2.7=2 full+7/10).`}]}];}
       setProgress({stage:"AI reading bar sheet…",pct:65,sub:"Identifying products"});
       const parsed=await aiCall(msgs);
       setProgress({stage:"Matching inventory…",pct:90,sub:"Building review list"});
@@ -1452,14 +1465,14 @@ function PurchasesTab({purchases,setPurch,items,setItems,liquor,setLiquor,priceH
     setLoad(true);setErr("");setParsed(null);setProgress({stage:"Reading file…",pct:15,sub:file.name});
     try{
       const isCSV=file.name.endsWith(".csv")||file.type==="text/csv";
-      const isImg=file.type.startsWith("image/");
+
       const names=items.map(i=>i.name).join(", ");
       const schema='{"vendor":"","invoiceNum":"","invoiceDate":"YYYY-MM-DD","lineItems":[{"name":"","qty":0,"unit":"lb","unitCost":0,"lineTotal":0,"matchExisting":false,"existingName":""}],"invoiceTotal":0,"notes":""}';
       const rules="Return ONLY the JSON object. No other text. Item names max 40 chars. unit=lb/oz/cs/ea/gal/bt/kg.";
       let msgs;
       setProgress({stage:"Sending to AI…",pct:40,sub:"Reading invoice"});
       if(isCSV){const text=await file.text();msgs=[{role:"user",content:[{type:"text",text:`Parse vendor invoice CSV for Beacon Hills.\nKnown items: ${names}\nCSV:\n${text.slice(0,6000)}\nSchema: ${schema}\n${rules}`}]}];}
-      else{setProgress({stage:"Encoding file…",pct:30,sub:"Preparing image"});const d64=await b64(file);setProgress({stage:"Sending to AI…",pct:50,sub:"Reading invoice"});msgs=[{role:"user",content:[{type:isImg?"image":"document",source:{type:"base64",media_type:file.type,data:d64}},{type:"text",text:`Parse vendor invoice for Beacon Hills.\nKnown items: ${names}\nSchema: ${schema}\n${rules}`}]}];}
+      else{setProgress({stage:"Encoding file…",pct:30,sub:"Preparing image"});const d64=await b64(file);setProgress({stage:"Sending to AI…",pct:50,sub:"Reading invoice"});msgs=[{role:"user",content:[aiContent(file,d64),{type:"text",text:`Parse vendor invoice for Beacon Hills.\nKnown items: ${names}\nSchema: ${schema}\n${rules}`}]}];}
       setProgress({stage:"AI parsing invoice…",pct:70,sub:"Extracting line items"});
       const p=await aiCall(msgs);
       setProgress({stage:"Done",pct:100,sub:`${(p.lineItems||[]).length} items · ${p.vendor||""}`});
@@ -1569,7 +1582,7 @@ function PricesTab({items,setItems,liquor,setLiquor,priceHist,setPH,show,walks,s
     setLoad(true);setErr("");setPend([]);setRev([]);setApplied(false);setProgress({stage:"Reading file…",pct:15,sub:file.name});
     try{
       const isCSV=file.name.endsWith(".csv")||file.type==="text/csv";
-      const isImg=file.type.startsWith("image/");
+
       if(isCSV){
         const text=await file.text();
         const{isSmart,rows}=parseSmartCSV(text);
@@ -1593,7 +1606,7 @@ function PricesTab({items,setItems,liquor,setLiquor,priceHist,setPH,show,walks,s
       let msgs;
       setProgress({stage:"Sending to AI…",pct:40,sub:"Reading cost report"});
       if(isCSV){const text=await file.text();msgs=[{role:"user",content:[{type:"text",text:`Parse average cost report CSV.\nKnown items: ${names}\nCSV:\n${text.slice(0,6000)}\nReturn ONLY JSON:\n{"prices":[{"name":"","unitCost":0,"unit":"lb","matchExisting":false,"existingName":""}],"reportDate":"YYYY-MM-DD","notes":""}`}]}];}
-      else{setProgress({stage:"Encoding file…",pct:30,sub:"Preparing image"});const d64=await b64(file);setProgress({stage:"Sending to AI…",pct:50,sub:"Reading cost report"});msgs=[{role:"user",content:[{type:isImg?"image":"document",source:{type:"base64",media_type:file.type,data:d64}},{type:"text",text:`Parse price/cost report.\nKnown items: ${names}\nReturn ONLY JSON:\n{"prices":[{"name":"","unitCost":0,"unit":"lb","matchExisting":false,"existingName":""}],"reportDate":"YYYY-MM-DD","notes":""}`}]}];}
+      else{setProgress({stage:"Encoding file…",pct:30,sub:"Preparing image"});const d64=await b64(file);setProgress({stage:"Sending to AI…",pct:50,sub:"Reading cost report"});msgs=[{role:"user",content:[aiContent(file,d64),{type:"text",text:`Parse price/cost report.\nKnown items: ${names}\nReturn ONLY JSON:\n{"prices":[{"name":"","unitCost":0,"unit":"lb","matchExisting":false,"existingName":""}],"reportDate":"YYYY-MM-DD","notes":""}`}]}];}
       setProgress({stage:"AI reading report…",pct:65,sub:"Extracting prices"});
       const p=await aiCall(msgs);
       setProgress({stage:"Matching items…",pct:90,sub:`${(p.prices||[]).length} prices found`});
