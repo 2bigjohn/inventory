@@ -16,7 +16,7 @@ const KEYS = {
   priceHist:`bh_prices_${V}`, walks:`bh_walks_${V}`, liquor:`bh_liquor_${V}`,
   bevSales:`bh_bevs_${V}`, snaps:`bh_snaps_${V}`, waste:`bh_waste_${V}`,
   recipes:`bh_recipes_${V}`, settings:`bh_settings_${V}`, users:`bh_users_${V}`,
-  sales:`bh_sales_${V}`,
+  sales:`bh_sales_${V}`, countSession:`bh_countsess_${V}`,
 };
 
 // Preferences is lazy-imported so web builds don't bundle it
@@ -636,6 +636,19 @@ function CountTab({items,walks,updateItem,show,canFinance,settings}) {
   const [fcat,setFCat]   = useState("All");
   const [eq,setEQ]       = useState("");
   const [eo,setEO]       = useState(false);
+  const [savedAt,setSavedAt] = useState(null);
+  // Saved count session for resume-after-interruption (walk + position)
+  const [resume,setResume] = useState(() => {
+    const s = LS.get(KEYS.countSession, null);
+    return s && s.mode && s.mode!=="picker" ? s : null;
+  });
+
+  // Autosave the count session (which walk + where you are) whenever it changes.
+  // Quantities themselves already persist via updateItem → items effect.
+  useEffect(() => {
+    if (mode==="picker") return;
+    LS.set(KEYS.countSession, {mode,awId,fi,ts:Date.now()});
+  }, [mode,awId,fi]);
 
   const ordered = awId ? (walks.find(w=>w.id===awId)?.itemIds.map(id=>items.find(i=>i.id===id)).filter(Boolean)||[]) : items;
   const cats    = ["All",...new Set(ordered.map(i=>i.category||"Other"))];
@@ -643,12 +656,31 @@ function CountTab({items,walks,updateItem,show,canFinance,settings}) {
   const fi_item = visible[fi]||null;
   const wname   = awId?(walks.find(w=>w.id===awId)?.name||"Walk"):"All Items";
 
-  const nudge = d => { if(!fi_item)return; updateItem(fi_item.id,{qty:Math.max(0,parseFloat((fi_item.qty+d).toFixed(4)))}); };
-  const commit= () => { if(fi_item&&eq!==""){const v=parseFloat(eq);if(!isNaN(v)&&v>=0)updateItem(fi_item.id,{qty:v});}setEQ("");setEO(false); };
-  const goNext= () => { if(fi>=visible.length-1){show("Count complete! ✓");setMode("list");}else setFI(i=>i+1);setEQ("");setEO(false); };
+  const markSaved = () => setSavedAt(Date.now());
+  const endSession = () => { LS.set(KEYS.countSession, {mode:"picker"}); setResume(null); };
+  const nudge = d => { if(!fi_item)return; updateItem(fi_item.id,{qty:Math.max(0,parseFloat((fi_item.qty+d).toFixed(4)))}); markSaved(); };
+  const commit= () => { if(fi_item&&eq!==""){const v=parseFloat(eq);if(!isNaN(v)&&v>=0){updateItem(fi_item.id,{qty:v});markSaved();}}setEQ("");setEO(false); };
+  const goNext= () => { if(fi>=visible.length-1){show("Count complete! ✓");endSession();setMode("list");}else setFI(i=>i+1);setEQ("");setEO(false); };
   const goPrev= () => { setFI(i=>Math.max(0,i-1));setEQ("");setEO(false); };
 
   if (mode==="picker") return (<>
+    {resume && (() => {
+      const rw = resume.awId ? walks.find(w=>w.id===resume.awId) : null;
+      const rname = resume.awId ? (rw?.name||"a walk") : "All Items";
+      return (
+        <div style={{...S.card,marginBottom:10,border:`1px solid ${C.amber}`}}>
+          <div style={{padding:14,display:"flex",alignItems:"center",gap:12}}>
+            <div style={{fontSize:24}}>⏸</div>
+            <div style={{flex:1,minWidth:0}}>
+              <div style={{fontWeight:700,fontSize:13,color:C.amber}}>Resume count in progress</div>
+              <div style={{fontFamily:mono,fontSize:10,color:C.muted,marginTop:2}}>{rname} · item {(resume.fi||0)+1}{resume.ts?` · saved ${new Date(resume.ts).toLocaleTimeString([],{hour:"numeric",minute:"2-digit"})}`:""}</div>
+            </div>
+            <button style={{...S.btn("primary"),padding:"8px 14px"}} onClick={()=>{setAW(resume.awId);setFI(resume.fi||0);setMode(resume.mode==="focus"?"focus":"list");setResume(null);}}>Resume →</button>
+            <button style={{...S.btn("secondary"),padding:"8px 10px"}} onClick={endSession}>✕</button>
+          </div>
+        </div>
+      );
+    })()}
     <div style={S.card}><div style={S.hd}><span style={S.title()}>Choose Walk</span></div>
       <div style={{padding:14,display:"grid",gap:10}}>
         {walks.filter(w=>w.itemIds.length>0).map(w=>{
@@ -684,8 +716,11 @@ function CountTab({items,walks,updateItem,show,canFinance,settings}) {
           <button style={{...S.btn(fi>=visible.length-1?"primary":"secondary"),padding:"7px 12px"}} onClick={goNext}>{fi>=visible.length-1?"Done ✓":"▶"}</button>
         </div>
       </div>
-      <div style={{height:3,background:C.surfaceAlt,borderRadius:2,marginBottom:18}}>
+      <div style={{height:3,background:C.surfaceAlt,borderRadius:2,marginBottom:8}}>
         <div style={{height:"100%",width:`${((fi+1)/visible.length)*100}%`,background:C.amber,borderRadius:2,transition:"width .25s"}}/>
+      </div>
+      <div style={{textAlign:"center",fontFamily:mono,fontSize:9,color:savedAt?C.green:C.muted,letterSpacing:1,marginBottom:14}}>
+        {savedAt?`✓ Saved ${new Date(savedAt).toLocaleTimeString([],{hour:"numeric",minute:"2-digit",second:"2-digit"})}`:"⟳ Autosaves as you count"}
       </div>
       <div style={{background:C.surface,border:`1px solid ${bp?C.red:C.border}`,borderRadius:12,padding:18,marginBottom:14}}>
         <div style={{fontFamily:mono,fontSize:10,color:C.amber,letterSpacing:2,marginBottom:6}}>{fi_item.category}</div>
