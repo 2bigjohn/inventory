@@ -694,22 +694,39 @@ function WalkTab({items,walks,setWalks,show,canFinance}) {
   const [search,setSrch] = useState("");
   const [dragIdx,setDI]  = useState(null);
   const [overIdx,setOI]  = useState(null);
+  const [sort,setSort]   = useState({field:"order",dir:"asc"});
+  const [filter,setFilt] = useState("");
+  const [movingId,setMov]= useState(null);
   const lpt              = useRef(null);
 
-  const walk      = walks.find(w=>w.id===aw);
-  const walkItems = walk ? walk.itemIds.map(id=>items.find(i=>i.id===id)).filter(Boolean) : [];
-  const unassigned= items.filter(i=>!walk?.itemIds.includes(i.id)&&(!search||i.name.toLowerCase().includes(search.toLowerCase())));
-  const totalUnassigned = items.filter(i=>!walks.some(w=>w.itemIds.includes(i.id))).length;
-  const walkVal    = walkItems.reduce((s,i)=>s+i.qty*i.unitCost,0);
+  const walk     = walks.find(w=>w.id===aw);
+  const rawItems = walk ? walk.itemIds.map(id=>items.find(i=>i.id===id)).filter(Boolean) : [];
 
-  const addWalk = () => { if(!nn.trim())return; const w={id:uid(),name:nn.trim(),emoji:ne,itemIds:[]}; setWalks(p=>[...p,w]); setAW(w.id); setNN(""); setCr(false); show(`Walk "${w.name}" created`); };
-  const delWalk = id => { setWalks(p=>p.filter(w=>w.id!==id)); setAW(walks.find(w=>w.id!==id)?.id||null); };
-  const addItem = id => setWalks(p=>p.map(w=>w.id===aw?{...w,itemIds:[...w.itemIds,id]}:w));
-  const remItem = id => setWalks(p=>p.map(w=>w.id===aw?{...w,itemIds:w.itemIds.filter(x=>x!==id)}:w));
-  const reorder = (from,to) => { if(from===to||to===null)return; setWalks(p=>p.map(w=>{ if(w.id!==aw)return w; const ids=[...w.itemIds]; const[m]=ids.splice(from,1); ids.splice(to,0,m); return{...w,itemIds:ids}; })); };
-  const autoAll = () => { setWalks(autoAssign(items,walks)); show("All items assigned to walks"); };
+  const sorted = sort.field==="order" ? rawItems : [...rawItems].sort((a,b)=>{
+    let av,bv;
+    if(sort.field==="name"){av=a.name.toLowerCase();bv=b.name.toLowerCase();}
+    else if(sort.field==="category"){av=(a.category||"").toLowerCase();bv=(b.category||"").toLowerCase();}
+    else if(sort.field==="qty"){av=a.qty;bv=b.qty;}
+    else{av=a.unitCost;bv=b.unitCost;}
+    return (av<bv?-1:av>bv?1:0)*(sort.dir==="asc"?1:-1);
+  });
+  const walkItems = filter ? sorted.filter(i=>i.name.toLowerCase().includes(filter.toLowerCase())||i.category?.toLowerCase().includes(filter.toLowerCase())) : sorted;
+  const canDrag   = sort.field==="order" && !filter;
+
+  const unassigned     = items.filter(i=>!walk?.itemIds.includes(i.id)&&(!search||i.name.toLowerCase().includes(search.toLowerCase())));
+  const totalUnassigned= items.filter(i=>!walks.some(w=>w.itemIds.includes(i.id))).length;
+
+  const addWalk  = () => { if(!nn.trim())return; const w={id:uid(),name:nn.trim(),emoji:ne,itemIds:[]}; setWalks(p=>[...p,w]); setAW(w.id); setNN(""); setCr(false); show(`Walk "${w.name}" created`); };
+  const delWalk  = id => { setWalks(p=>p.filter(w=>w.id!==id)); setAW(walks.find(w=>w.id!==id)?.id||null); };
+  const addItem  = id => setWalks(p=>p.map(w=>w.id===aw?{...w,itemIds:[...w.itemIds,id]}:w));
+  const remItem  = id => { setWalks(p=>p.map(w=>w.id===aw?{...w,itemIds:w.itemIds.filter(x=>x!==id)}:w)); if(movingId===id)setMov(null); };
+  const moveItem = (id,toId) => { setWalks(p=>p.map(w=>w.id===aw?{...w,itemIds:w.itemIds.filter(x=>x!==id)}:w.id===toId?{...w,itemIds:[...w.itemIds,id]}:w)); setMov(null); };
+  const reorder  = (from,to) => { if(from===to||to===null)return; setWalks(p=>p.map(w=>{ if(w.id!==aw)return w; const ids=[...w.itemIds]; const[m]=ids.splice(from,1); ids.splice(to,0,m); return{...w,itemIds:ids}; })); };
+  const autoAll  = () => { setWalks(autoAssign(items,walks)); show("All items assigned to walks"); };
+  const cycleSort= field => setSort(s=>s.field===field?{field,dir:s.dir==="asc"?"desc":"asc"}:{field,dir:"asc"});
 
   const EMOJIS = ["📦","🥩","🥫","❄️","🍺","🍷","🥦","🧀","🧂","🫙","🍳","🗄️"];
+  const SortChip = ({field,label}) => { const on=sort.field===field; return <button onClick={()=>cycleSort(field)} style={{padding:"5px 10px",borderRadius:12,border:`1px solid ${on?C.amber:C.border}`,background:on?`${C.amber}18`:"none",color:on?C.amber:C.muted,fontFamily:mono,fontSize:10,cursor:"pointer",whiteSpace:"nowrap"}}>{label}{on?(sort.dir==="asc"?" ↑":" ↓"):""}</button>; };
 
   return (<>
     {totalUnassigned>0&&(
@@ -720,7 +737,7 @@ function WalkTab({items,walks,setWalks,show,canFinance}) {
     )}
     <div style={{display:"flex",gap:8,overflowX:"auto",paddingBottom:4,marginBottom:12}}>
       {walks.map(w=>(
-        <button key={w.id} onClick={()=>setAW(w.id)}
+        <button key={w.id} onClick={()=>{setAW(w.id);setFilt("");setMov(null);setSrch("");}}
           style={{flex:"0 0 auto",padding:"8px 14px",borderRadius:20,border:`2px solid ${aw===w.id?C.amber:C.border}`,background:aw===w.id?`${C.amber}18`:C.surface,color:aw===w.id?C.amber:C.muted,fontFamily:mono,fontSize:11,cursor:"pointer",whiteSpace:"nowrap",display:"flex",alignItems:"center",gap:6}}>
           {w.emoji} {w.name} ({w.itemIds.length})
         </button>
@@ -741,43 +758,75 @@ function WalkTab({items,walks,setWalks,show,canFinance}) {
     {walk&&(
       <div style={S.card}>
         <div style={S.hd}>
-          <span style={S.title()}>{walk.emoji} {walk.name} — {walkItems.length} items{canFinance?` · ${fmt$(walkVal)}`:""}</span>
+          <span style={S.title()}>{walk.emoji} {walk.name} — {walkItems.length}{filter||sort.field!=="order"?`/${rawItems.length}`:""} items{canFinance?` · ${fmt$(rawItems.reduce((s,i)=>s+i.qty*i.unitCost,0))}`:""}</span>
           <div style={{display:"flex",gap:8}}>
-            <button style={{...S.btn("blue"),padding:"7px 12px",fontSize:10}} onClick={()=>setPick(!picking)}>{picking?"← Done":"+ Add Items"}</button>
+            <button style={{...S.btn("blue"),padding:"7px 12px",fontSize:10}} onClick={()=>{setPick(p=>!p);setMov(null);}}>{picking?"← Done":"+ Add"}</button>
             {walks.length>1&&<button style={{...S.btn("ghost"),padding:"7px 10px",color:C.red,fontSize:16}} onClick={()=>delWalk(walk.id)}>🗑</button>}
           </div>
         </div>
-        {walkItems.length===0&&!picking&&<div style={{padding:28,textAlign:"center",color:C.muted,fontFamily:mono,fontSize:11}}>No items. Tap "+ Add Items".</div>}
+
+        {!picking&&rawItems.length>0&&(
+          <div style={{padding:"8px 14px 8px",borderBottom:`1px solid ${C.border}`,display:"flex",gap:6,flexWrap:"wrap",alignItems:"center"}}>
+            <input style={{...S.inp,flex:"1 1 130px",padding:"6px 10px",fontSize:11,minWidth:0}} placeholder="🔍 Filter…" value={filter} onChange={e=>{setFilt(e.target.value);setMov(null);}}/>
+            <SortChip field="name" label="Name"/>
+            <SortChip field="category" label="Category"/>
+            <SortChip field="qty" label="Qty"/>
+            {canFinance&&<SortChip field="cost" label="Cost"/>}
+            {sort.field!=="order"&&<button onClick={()=>setSort({field:"order",dir:"asc"})} style={{padding:"5px 10px",borderRadius:12,border:`1px solid ${C.border}`,background:"none",color:C.muted,fontFamily:mono,fontSize:10,cursor:"pointer"}}>↕ Manual</button>}
+          </div>
+        )}
+
+        {walkItems.length===0&&!picking&&(
+          <div style={{padding:28,textAlign:"center",color:C.muted,fontFamily:mono,fontSize:11}}>
+            {filter?"No matches — clear filter to see all.":rawItems.length===0?`No items. Tap "+ Add".`:""}
+          </div>
+        )}
+
         {!picking&&walkItems.length>0&&(
           <div>
-            <div style={{padding:"5px 14px 4px",fontFamily:mono,fontSize:9,color:C.muted,letterSpacing:2,borderBottom:`1px solid ${C.border}`}}>HOLD & DRAG TO REORDER</div>
-            <div onTouchMove={e=>{if(dragIdx===null)return;e.preventDefault();const y=e.touches[0].clientY;let found=null;document.querySelectorAll("[data-wr]").forEach((r,i)=>{const rc=r.getBoundingClientRect();if(y>=rc.top&&y<=rc.bottom)found=i;});setOI(found);}} onTouchEnd={()=>{clearTimeout(lpt.current);if(dragIdx!==null&&overIdx!==null)reorder(dragIdx,overIdx);setDI(null);setOI(null);}}>
+            {canDrag&&<div style={{padding:"4px 14px",fontFamily:mono,fontSize:9,color:C.muted,letterSpacing:2,borderBottom:`1px solid ${C.border}`}}>HOLD & DRAG TO REORDER</div>}
+            <div onTouchMove={e=>{if(!canDrag||dragIdx===null)return;e.preventDefault();const y=e.touches[0].clientY;let found=null;document.querySelectorAll("[data-wr]").forEach((r,i)=>{const rc=r.getBoundingClientRect();if(y>=rc.top&&y<=rc.bottom)found=i;});setOI(found);}} onTouchEnd={()=>{clearTimeout(lpt.current);if(canDrag&&dragIdx!==null&&overIdx!==null)reorder(dragIdx,overIdx);setDI(null);setOI(null);}}>
               {walkItems.map((item,idx)=>{
-                const isDrag=dragIdx===idx, isOver=overIdx===idx&&dragIdx!==null&&dragIdx!==idx;
-                return (<div key={item.id} data-wr draggable
-                  onDragStart={()=>setDI(idx)} onDragOver={e=>{e.preventDefault();setOI(idx);}} onDrop={()=>reorder(dragIdx,idx)}
-                  onTouchStart={e=>{lpt.current=setTimeout(()=>setDI(idx),350);}}
-                  style={{display:"flex",alignItems:"center",gap:10,padding:"11px 14px",borderBottom:`1px solid ${C.border}15`,background:isDrag?`${C.amber}18`:isOver?`${C.blue}15`:"transparent",borderTop:isOver?`2px solid ${C.blue}`:"2px solid transparent",opacity:isDrag?0.5:1,userSelect:"none",touchAction:"none",cursor:"grab"}}>
-                  <div style={{fontFamily:mono,fontSize:12,color:C.amber,fontWeight:700,width:22,textAlign:"center",flexShrink:0}}>{idx+1}</div>
-                  <div style={{color:C.border,fontSize:14,flexShrink:0}}>⠿</div>
-                  <div style={{flex:1,minWidth:0}}>
-                    <div style={{fontWeight:600,fontSize:13,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{item.name||"Unnamed"}</div>
-                    <div style={{fontFamily:mono,fontSize:10,color:C.muted}}>{item.category} · {item.unit}</div>
+                const isDrag=canDrag&&dragIdx===idx, isOver=canDrag&&overIdx===idx&&dragIdx!==null&&dragIdx!==idx, isMov=movingId===item.id;
+                return (
+                  <div key={item.id} data-wr={canDrag?true:undefined} draggable={canDrag}
+                    onDragStart={canDrag?()=>setDI(idx):undefined} onDragOver={canDrag?e=>{e.preventDefault();setOI(idx);}:undefined} onDrop={canDrag?()=>reorder(dragIdx,idx):undefined}
+                    onTouchStart={canDrag?()=>{lpt.current=setTimeout(()=>setDI(idx),350);}:undefined}
+                    style={{borderBottom:`1px solid ${C.border}15`,background:isDrag?`${C.amber}18`:isOver?`${C.blue}15`:isMov?`${C.blue}08`:"transparent",borderTop:isOver?`2px solid ${C.blue}`:"2px solid transparent",opacity:isDrag?0.5:1,userSelect:"none",touchAction:canDrag?"none":"auto",cursor:canDrag?"grab":"default"}}>
+                    <div style={{display:"flex",alignItems:"center",gap:10,padding:"11px 14px"}}>
+                      {canDrag&&<div style={{fontFamily:mono,fontSize:12,color:C.amber,fontWeight:700,width:22,textAlign:"center",flexShrink:0}}>{idx+1}</div>}
+                      {canDrag&&<div style={{color:C.border,fontSize:14,flexShrink:0}}>⠿</div>}
+                      <div style={{flex:1,minWidth:0}}>
+                        <div style={{fontWeight:600,fontSize:13,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{item.name||"Unnamed"}</div>
+                        <div style={{fontFamily:mono,fontSize:10,color:C.muted}}>{item.category} · {item.unit}</div>
+                      </div>
+                      <div style={{flexShrink:0,textAlign:"right",marginRight:4}}>
+                        <div style={{fontFamily:mono,fontSize:14,fontWeight:700,color:item.par>0&&item.qty<item.par?C.red:C.muted}}>{item.qty}</div>
+                        {canFinance&&<div style={{fontFamily:mono,fontSize:10,color:C.muted}}>{fmt$(item.qty*item.unitCost)}</div>}
+                      </div>
+                      <button onClick={()=>setMov(isMov?null:item.id)} title="Move to walk" style={{background:isMov?`${C.blue}25`:"none",border:`1px solid ${isMov?C.blue:C.border}`,borderRadius:6,color:isMov?C.blue:C.muted,fontSize:13,cursor:"pointer",padding:"5px 8px",flexShrink:0}}>↗</button>
+                      <button onClick={()=>remItem(item.id)} style={{background:"none",border:"none",color:C.red,fontSize:18,cursor:"pointer",padding:"2px 6px",flexShrink:0}}>✕</button>
+                    </div>
+                    {isMov&&(
+                      <div style={{padding:"0 14px 12px 14px",display:"flex",gap:6,flexWrap:"wrap",alignItems:"center"}}>
+                        <span style={{fontFamily:mono,fontSize:10,color:C.muted,flexShrink:0}}>Move to:</span>
+                        {walks.filter(w=>w.id!==aw).map(w=>(
+                          <button key={w.id} onClick={()=>moveItem(item.id,w.id)} style={{padding:"5px 12px",borderRadius:14,border:`1px solid ${C.blue}40`,background:`${C.blue}15`,color:C.blue,fontFamily:mono,fontSize:11,cursor:"pointer"}}>{w.emoji} {w.name}</button>
+                        ))}
+                        <button onClick={()=>setMov(null)} style={{padding:"5px 10px",borderRadius:14,border:`1px solid ${C.border}`,background:"none",color:C.muted,fontFamily:mono,fontSize:11,cursor:"pointer"}}>Cancel</button>
+                      </div>
+                    )}
                   </div>
-                  <div style={{flexShrink:0,textAlign:"right"}}>
-                    <div style={{fontFamily:mono,fontSize:14,fontWeight:700,color:item.par>0&&item.qty<item.par?C.red:C.muted}}>{item.qty}</div>
-                    {canFinance&&<div style={{fontFamily:mono,fontSize:10,color:C.muted}}>{fmt$(item.qty*item.unitCost)}</div>}
-                  </div>
-                  <button onClick={()=>remItem(item.id)} style={{background:"none",border:"none",color:C.red,fontSize:18,cursor:"pointer",padding:"2px 6px",flexShrink:0}}>✕</button>
-                </div>);
+                );
               })}
             </div>
           </div>
         )}
+
         {picking&&(
           <div>
-            <div style={{padding:"10px 14px 6px"}}><input style={S.inp} placeholder="Search…" value={search} onChange={e=>setSrch(e.target.value)}/></div>
-            {unassigned.length===0&&<div style={{padding:20,textAlign:"center",color:C.muted,fontFamily:mono,fontSize:11}}>{search?"No matches.":"All items assigned."}</div>}
+            <div style={{padding:"10px 14px 6px"}}><input style={S.inp} placeholder="Search items to add…" value={search} onChange={e=>setSrch(e.target.value)}/></div>
+            {unassigned.length===0&&<div style={{padding:20,textAlign:"center",color:C.muted,fontFamily:mono,fontSize:11}}>{search?"No matches.":"All items already in this walk."}</div>}
             {unassigned.map(item=>(
               <div key={item.id} style={{padding:"9px 14px",borderBottom:`1px solid ${C.border}15`,display:"flex",alignItems:"center",gap:10}}>
                 <div style={{flex:1,minWidth:0}}><div style={{fontWeight:600,fontSize:13}}>{item.name||"Unnamed"}</div><div style={{fontFamily:mono,fontSize:10,color:C.muted}}>{item.category}</div></div>
@@ -788,10 +837,11 @@ function WalkTab({items,walks,setWalks,show,canFinance}) {
         )}
       </div>
     )}
-    {walkItems.length>0&&!picking&&(
+
+    {rawItems.length>0&&!picking&&(
       <div style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:8,padding:"12px 14px",display:"flex",justifyContent:"space-between"}}>
-        <div><div style={{fontFamily:mono,fontSize:9,color:C.muted,letterSpacing:2,marginBottom:4}}>WALK VALUE</div><div style={{fontFamily:mono,fontSize:18,fontWeight:700,color:C.amber}}>{fmt$(walkItems.reduce((s,i)=>s+i.qty*i.unitCost,0))}</div></div>
-        <div style={{textAlign:"right"}}><div style={{fontFamily:mono,fontSize:9,color:C.muted,letterSpacing:2,marginBottom:4}}>ITEMS</div><div style={{fontFamily:mono,fontSize:18,fontWeight:700}}>{walkItems.length}</div></div>
+        <div><div style={{fontFamily:mono,fontSize:9,color:C.muted,letterSpacing:2,marginBottom:4}}>WALK VALUE</div><div style={{fontFamily:mono,fontSize:18,fontWeight:700,color:C.amber}}>{fmt$(rawItems.reduce((s,i)=>s+i.qty*i.unitCost,0))}</div></div>
+        <div style={{textAlign:"right"}}><div style={{fontFamily:mono,fontSize:9,color:C.muted,letterSpacing:2,marginBottom:4}}>ITEMS</div><div style={{fontFamily:mono,fontSize:18,fontWeight:700}}>{rawItems.length}</div></div>
       </div>
     )}
   </>);
