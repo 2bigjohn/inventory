@@ -1364,20 +1364,34 @@ function GmailImport({setPurch,show}) {
     fetch(url, {headers:{Authorization:`Bearer ${tok}`}}).then(r=>r.json());
 
   const extractBody = msg => {
+    const stripHtml = html => html
+      .replace(/<style[^>]*>[\s\S]*?<\/style>/gi," ")
+      .replace(/<script[^>]*>[\s\S]*?<\/script>/gi," ")
+      .replace(/<[^>]+>/g," ").replace(/\s+/g," ").trim();
+    const decode = b64 => atob(b64.replace(/-/g,"+").replace(/_/g,"/"));
     const walk = parts => {
       for (const p of parts||[]) {
-        if (p.mimeType==="text/plain" && p.body?.data)
-          return atob(p.body.data.replace(/-/g,"+").replace(/_/g,"/"));
+        if (p.mimeType==="text/plain" && p.body?.data) return decode(p.body.data);
         if (p.parts) { const r=walk(p.parts); if(r) return r; }
       }
       for (const p of parts||[]) {
-        if (p.mimeType==="text/html" && p.body?.data)
-          return atob(p.body.data.replace(/-/g,"+").replace(/_/g,"/")).replace(/<[^>]+>/g," ").replace(/\s+/g," ").trim();
+        if (p.mimeType==="text/html" && p.body?.data) return stripHtml(decode(p.body.data));
+        if (p.parts) { const r=walkHtml(p.parts); if(r) return r; }
+      }
+      return "";
+    };
+    const walkHtml = parts => {
+      for (const p of parts||[]) {
+        if (p.mimeType==="text/html" && p.body?.data) return stripHtml(decode(p.body.data));
+        if (p.parts) { const r=walkHtml(p.parts); if(r) return r; }
       }
       return "";
     };
     if (msg.payload?.parts) return walk(msg.payload.parts);
-    if (msg.payload?.body?.data) return atob(msg.payload.body.data.replace(/-/g,"+").replace(/_/g,"/"));
+    if (msg.payload?.body?.data) {
+      const raw = decode(msg.payload.body.data);
+      return raw.startsWith("<") ? stripHtml(raw) : raw;
+    }
     return msg.snippet||"";
   };
 
@@ -1389,36 +1403,59 @@ function GmailImport({setPurch,show}) {
       const since = new Date(); since.setDate(since.getDate()-90);
       const after = Math.floor(since.getTime()/1000);
       const q = encodeURIComponent(
-        `(from:sysco OR from:usfoods OR from:"us foods" OR from:"gordon food" OR from:"restaurant depot" OR from:"performance food" OR from:shamrock OR from:"lone star" OR subject:invoice OR subject:receipt OR subject:"order confirmation" OR subject:"payment confirmation") after:${after}`
+        `(from:sysco OR from:usfoods OR from:"us foods" OR from:"gordon food" OR from:"restaurant depot" OR from:"performance food" OR from:shamrock OR from:"lone star" OR from:"fortune fish" OR from:loffredo OR from:reinhart OR from:"chef's warehouse" OR from:"chefs warehouse" OR from:pfg OR from:rndc OR from:"southern glazer" OR from:breakthru OR from:cintas OR from:ecolab OR subject:invoice OR subject:receipt OR subject:"order confirmation" OR subject:"delivery confirmation" OR subject:statement) after:${after}`
       );
       setProg({stage:"Searching Gmail…",pct:15});
-      const list = await gmailFetch(`https://www.googleapis.com/gmail/v1/users/me/messages?q=${q}&maxResults=40`,tok);
+      const list = await gmailFetch(`https://www.googleapis.com/gmail/v1/users/me/messages?q=${q}&maxResults=100`,tok);
       const msgs = list.messages||[];
       if (!msgs.length) { setErr("No vendor emails found in the last 3 months."); setProg(null); setLoad(false); return; }
 
-      setProg({stage:`Found ${msgs.length} emails — reading…`,pct:25});
+      setProg({stage:`Found ${msgs.length} emails — reading…`,pct:20});
       const bodies = [];
-      const limit = Math.min(msgs.length, 25);
+      const limit = Math.min(msgs.length, 50);
       for (let i=0; i<limit; i++) {
         const msg = await gmailFetch(`https://www.googleapis.com/gmail/v1/users/me/messages/${msgs[i].id}?format=full`,tok);
         bodies.push({
           subject: hdr(msg,"Subject"),
           from:    hdr(msg,"From"),
           date:    hdr(msg,"Date"),
-          body:    extractBody(msg).slice(0,3000),
+          body:    extractBody(msg).slice(0,8000),
         });
-        setProg({stage:`Reading emails… (${i+1}/${limit})`,pct:25+Math.round((i/limit)*40)});
+        setProg({stage:`Reading emails… (${i+1}/${limit})`,pct:20+Math.round((i/limit)*45)});
       }
 
       setProg({stage:"Sending to AI…",pct:66});
       const results = [];
-      const BATCH = 5;
+      const BATCH = 4;
+      const vendorGuide = `Vendor → category guide:
+- Fortune Fish & Gourmet / fortune fish → Food - Protein (seafood/fish)
+- Loffredo → Food - Produce or Food - Dry (Midwest grocery distributor)
+- Sysco / US Foods / Gordon Food / Reinhart / Performance Food / PFG → split by line items when possible; default Food - Misc
+- Chef's Warehouse / Chefs Warehouse → Food - Protein or Food - Dairy (specialty)
+- Restaurant Depot → split by line items if possible
+- Shamrock Foods / US Dairy → Food - Dairy
+- Cintas / Ecolab / Sysco Chemical / SESCO → Supplies
+- RNDC / Southern Glazer / Breakthru / Republic → Liquor, Beer, or Wine (check line items)
+- Any beer-only distributor → Beer
+- Any wine-only merchant → Wine`;
       for (let i=0; i<bodies.length; i+=BATCH) {
         const chunk = bodies.slice(i,i+BATCH);
         const txt = chunk.map((e,n)=>`--- Email ${n+1} ---\nFrom: ${e.from}\nDate: ${e.date}\nSubject: ${e.subject}\n${e.body}`).join("\n\n");
-        const parsed = await aiCall([{role:"user",content:`Extract purchase data from these vendor emails for Beacon Hills restaurant.\nOnly include emails that are actual invoices or payment confirmations with a dollar amount.\nReturn ONLY valid JSON:\n{"purchases":[{"vendor":"","date":"YYYY-MM-DD","amount":0,"category":"Food - Misc","invoice":"","notes":"","confidence":"high|medium|low"}]}\nCategories: ${CATS.join(", ")}\nSkip newsletters, promotions, tracking updates with no total amount.\n\n${txt}`}]);
+        const parsed = await aiCall([{role:"user",content:`Extract all vendor purchase data from these emails for Beacon Hills restaurant (New Standard Hospitality).
+
+${vendorGuide}
+
+SPLITTING RULE: If one invoice/statement contains line items across multiple cost categories (e.g. a Sysco order with proteins + produce + dry goods), create a SEPARATE entry for each category with the appropriate sub-total. Use the notes field to indicate it was split (e.g. "split from $2,400 invoice").
+
+Return ONLY valid JSON:
+{"purchases":[{"vendor":"","date":"YYYY-MM-DD","amount":0,"category":"Food - Misc","invoice":"","notes":"","confidence":"high|medium|low"}]}
+Categories: ${CATS.join(", ")}
+
+Skip newsletters, promotions, shipping tracking with no dollar total, and non-food/beverage/supply purchases.
+
+${txt}`}],6000);
         if (parsed.purchases?.length) results.push(...parsed.purchases);
-        setProg({stage:"Processing with AI…",pct:66+Math.round(((i+BATCH)/bodies.length)*30)});
+        setProg({stage:`Processing emails ${i+1}–${Math.min(i+BATCH,bodies.length)} of ${bodies.length}…`,pct:66+Math.round(((i+BATCH)/bodies.length)*30)});
       }
 
       setProg({stage:"Done",pct:100});
