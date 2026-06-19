@@ -1002,7 +1002,7 @@ function LiquorTab({liquor,setLiquor,show,bevSales,setBevSales,lqTotals,settings
       const isCSV=file.name.endsWith(".csv")||file.type==="text/csv";
       const known=liquor.map(l=>l.name).join(", ");
       let msgs;
-      if(isCSV){const text=await file.text();msgs=[{role:"user",content:[{type:"text",text:`Parse liquor inventory CSV.\nKnown items: ${known||"none"}\nCSV:\n${text.slice(0,6000)}\nReturn ONLY JSON:\n{"items":[{"name":"","category":"Spirits","subType":"Whiskey","bottleSize":"750mL","qty":0,"unitCost":0,"matchExisting":false,"existingName":""}],"notes":""}\ncategory: Spirits/Beer/Wine/NA Bev`}]}];}
+      if(isCSV){const text=await file.text();msgs=[{role:"user",content:[{type:"text",text:`Parse liquor inventory CSV.\nKnown items: ${known||"none"}\nCSV:\n${text.slice(0,120000)}\nReturn ONLY JSON:\n{"items":[{"name":"","category":"Spirits","subType":"Whiskey","bottleSize":"750mL","qty":0,"unitCost":0,"matchExisting":false,"existingName":""}],"notes":""}\ncategory: Spirits/Beer/Wine/NA Bev`}]}];}
       else{msgs=[{role:"user",content:[aiContent(file,d64),{type:"text",text:`Parse this liquor inventory for a restaurant bar.\nKnown items: ${known||"none"}\nReturn ONLY valid JSON:\n{"items":[{"name":"","category":"Spirits","subType":"Whiskey","bottleSize":"750mL","qty":0,"unitCost":0,"matchExisting":false,"existingName":""}],"notes":""}\ncategory: Spirits/Beer/Wine/NA Bev. qty uses tenths for spirits (2.7=2 full+7/10).`}]}];}
       setProgress({stage:"AI reading bar sheet…",pct:65,sub:"Identifying products"});
       const parsed=await aiCall(msgs);
@@ -1471,7 +1471,7 @@ function PurchasesTab({purchases,setPurch,items,setItems,liquor,setLiquor,priceH
       const rules="Return ONLY the JSON object. No other text. Item names max 40 chars. unit=lb/oz/cs/ea/gal/bt/kg.";
       let msgs;
       setProgress({stage:"Sending to AI…",pct:40,sub:"Reading invoice"});
-      if(isCSV){const text=await file.text();msgs=[{role:"user",content:[{type:"text",text:`Parse vendor invoice CSV for Beacon Hills.\nKnown items: ${names}\nCSV:\n${text.slice(0,6000)}\nSchema: ${schema}\n${rules}`}]}];}
+      if(isCSV){const text=await file.text();msgs=[{role:"user",content:[{type:"text",text:`Parse vendor invoice CSV for Beacon Hills.\nKnown items: ${names}\nCSV:\n${text.slice(0,120000)}\nSchema: ${schema}\n${rules}`}]}];}
       else{setProgress({stage:"Encoding file…",pct:30,sub:"Preparing image"});const d64=await b64(file);setProgress({stage:"Sending to AI…",pct:50,sub:"Reading invoice"});msgs=[{role:"user",content:[aiContent(file,d64),{type:"text",text:`Parse vendor invoice for Beacon Hills.\nKnown items: ${names}\nSchema: ${schema}\n${rules}`}]}];}
       setProgress({stage:"AI parsing invoice…",pct:70,sub:"Extracting line items"});
       const p=await aiCall(msgs);
@@ -1578,6 +1578,36 @@ function PricesTab({items,setItems,liquor,setLiquor,priceHist,setPH,show,walks,s
     return{isSmart,rows};
   };
 
+  const parseSyscoCSV=(text,existingItems=[])=>{
+    const lines=text.split("\n");
+    let headerIdx=-1,headers=[];
+    for(let i=0;i<Math.min(lines.length,5);i++){
+      const h=lines[i].split(",").map(c=>c.replace(/"/g,"").trim());
+      if(h.includes("SUPC")&&h.includes("Description")){headerIdx=i;headers=h;break;}
+    }
+    if(headerIdx===-1)return null;
+    const descIdx=headers.indexOf("Description");
+    const priceIdx=headers.indexOf("Price");
+    const unitIdx=headers.findIndex(h=>h.startsWith("CS/LB"));
+    if(descIdx===-1||priceIdx===-1)return null;
+    const rows=[];
+    for(let i=headerIdx+1;i<lines.length;i++){
+      if(!lines[i].trim())continue;
+      const vals=[];let cur="",inQ=false;
+      for(const ch of lines[i]){if(ch==='"'){inQ=!inQ;}else if(ch===','&&!inQ){vals.push(cur);cur="";}else cur+=ch;}
+      vals.push(cur);
+      const desc=(vals[descIdx]||"").trim();if(!desc)continue;
+      const unitCost=parseFloat((vals[priceIdx]||"").trim())||0;
+      const rawUnit=unitIdx>=0?(vals[unitIdx]||"").trim().toUpperCase().replace(/\s+/g,""):"CS";
+      const unit=rawUnit==="LB"?"lb":rawUnit==="EA"?"ea":"cs";
+      const entry={name:desc,unitCost,unit,matchExisting:false,existingName:""};
+      const m=existingItems.find(x=>x.name.toLowerCase()===desc.toLowerCase());
+      if(m){entry.matchExisting=true;entry.existingName=m.name;}
+      rows.push(entry);
+    }
+    return rows.length>0?rows:null;
+  };
+
   const process=async file=>{
     setLoad(true);setErr("");setPend([]);setRev([]);setApplied(false);setProgress({stage:"Reading file…",pct:15,sub:file.name});
     try{
@@ -1601,11 +1631,20 @@ function PricesTab({items,setItems,liquor,setLiquor,priceHist,setPH,show,walks,s
           setTimeout(()=>setProgress(null),900);
           setLoad(false);return;
         }
+        const sysco=parseSyscoCSV(text,items);
+        if(sysco){
+          setProgress({stage:"Matching items…",pct:80,sub:`${sysco.length} items found`});
+          setPend(sysco);
+          setPH(prev=>[{id:uid(),file:file.name,ts:new Date().toLocaleString(),prices:sysco,notes:`Sysco import: ${sysco.length} items`},...prev.slice(0,19)]);
+          setProgress({stage:"Done",pct:100,sub:`${sysco.length} items imported`});
+          setTimeout(()=>setProgress(null),900);
+          setLoad(false);return;
+        }
       }
       const names=items.map(i=>i.name).join(", ");
       let msgs;
       setProgress({stage:"Sending to AI…",pct:40,sub:"Reading cost report"});
-      if(isCSV){const text=await file.text();msgs=[{role:"user",content:[{type:"text",text:`Parse average cost report CSV.\nKnown items: ${names}\nCSV:\n${text.slice(0,6000)}\nReturn ONLY JSON:\n{"prices":[{"name":"","unitCost":0,"unit":"lb","matchExisting":false,"existingName":""}],"reportDate":"YYYY-MM-DD","notes":""}`}]}];}
+      if(isCSV){const text=await file.text();msgs=[{role:"user",content:[{type:"text",text:`Parse average cost report CSV.\nKnown items: ${names}\nCSV:\n${text.slice(0,120000)}\nReturn ONLY JSON:\n{"prices":[{"name":"","unitCost":0,"unit":"lb","matchExisting":false,"existingName":""}],"reportDate":"YYYY-MM-DD","notes":""}`}]}];}
       else{setProgress({stage:"Encoding file…",pct:30,sub:"Preparing image"});const d64=await b64(file);setProgress({stage:"Sending to AI…",pct:50,sub:"Reading cost report"});msgs=[{role:"user",content:[aiContent(file,d64),{type:"text",text:`Parse price/cost report.\nKnown items: ${names}\nReturn ONLY JSON:\n{"prices":[{"name":"","unitCost":0,"unit":"lb","matchExisting":false,"existingName":""}],"reportDate":"YYYY-MM-DD","notes":""}`}]}];}
       setProgress({stage:"AI reading report…",pct:65,sub:"Extracting prices"});
       const p=await aiCall(msgs);
