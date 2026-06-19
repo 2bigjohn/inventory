@@ -21,9 +21,15 @@ const KEYS = {
 
 // Preferences is lazy-imported so web builds don't bundle it
 let _prefs = null;
-const getPrefs = () => _prefs || (_prefs = Capacitor.isNativePlatform()
-  ? import("@capacitor/preferences").then(m => m.Preferences).catch(() => null)
-  : Promise.resolve(null));
+const getPrefsWithTimeout = () => {
+  if (!Capacitor.isNativePlatform()) return Promise.resolve(null);
+  if (!_prefs) {
+    const load = import("@capacitor/preferences").then(m => m.Preferences).catch(() => null);
+    const timeout = new Promise(res => setTimeout(() => res(null), 3000));
+    _prefs = Promise.race([load, timeout]);
+  }
+  return _prefs;
+};
 
 const LS = {
   get: (k, fb) => { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : fb; } catch { return fb; } },
@@ -31,22 +37,23 @@ const LS = {
     try { localStorage.setItem(k, JSON.stringify(v)); } catch {}
     // async backup to Capacitor Preferences on native (fire-and-forget)
     if (Capacitor.isNativePlatform()) {
-      getPrefs().then(p => p?.set({ key:k, value:JSON.stringify(v) })).catch(()=>{});
+      getPrefsWithTimeout().then(p => p?.set({ key:k, value:JSON.stringify(v) })).catch(()=>{});
     }
   },
   // Called once at startup on native: if localStorage is empty, restore from Preferences
   restore: async () => {
     if (!Capacitor.isNativePlatform()) return false;
-    const p = await getPrefs();
-    if (!p) return false;
+    // Check localStorage FIRST — skip the plugin entirely if data is already there
     const hasLocal = Object.values(KEYS).some(k => localStorage.getItem(k));
-    if (hasLocal) return false; // already loaded, nothing to restore
+    if (hasLocal) return false;
+    // localStorage is empty — try to restore from Preferences (3s timeout)
+    const p = await getPrefsWithTimeout();
+    if (!p) return false;
     let restored = false;
     for (const k of Object.values(KEYS)) {
       const { value } = await p.get({ key: k });
       if (value) { localStorage.setItem(k, value); restored = true; }
     }
-    // also restore settings that live outside KEYS
     for (const k of ["bh_apikey_v6","bh_gclientid_v6","bh_gclientid_android","bh_gclientsecret_android"]) {
       const { value } = await p.get({ key: k });
       if (value) localStorage.setItem(k, value);
@@ -377,6 +384,14 @@ function LoginScreen({ onLogin }) {
 }
 
 // ─── ROOT APP ─────────────────────────────────────────────────────────────────
+// Inject keyframe animations once at module level
+const _styleTag = document.createElement("style");
+_styleTag.textContent = `
+  @keyframes bh-pulse{0%,100%{opacity:.3}50%{opacity:1}}
+  @keyframes bh-bar{0%{width:0%}60%{width:75%}90%{width:92%}100%{width:95%}}
+`;
+document.head.appendChild(_styleTag);
+
 // Shell handles the one-time async Preferences restore on native Android.
 // Once ready it renders AppInner, which initialises all state from localStorage
 // (which by then has been populated from Preferences if needed).
@@ -390,8 +405,12 @@ export default function App() {
     });
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
   if (!storeReady) return (
-    <div style={{background:C.bg,height:"100dvh",display:"flex",alignItems:"center",justifyContent:"center"}}>
-      <div style={{fontFamily:mono,fontSize:12,color:C.amber,letterSpacing:3}}>LOADING…</div>
+    <div style={{background:C.bg,height:"100dvh",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:24}}>
+      <div style={{width:48,height:48,background:C.amber,borderRadius:10,display:"flex",alignItems:"center",justifyContent:"center",fontFamily:mono,fontWeight:700,color:"#000",fontSize:20}}>BH</div>
+      <div style={{fontFamily:mono,fontSize:11,color:C.amber,letterSpacing:4,animation:"bh-pulse 1.4s ease-in-out infinite"}}>LOADING…</div>
+      <div style={{width:180,height:3,background:`${C.amber}20`,borderRadius:2,overflow:"hidden"}}>
+        <div style={{height:"100%",background:C.amber,borderRadius:2,animation:"bh-bar 3s ease-out forwards"}}/>
+      </div>
     </div>
   );
   return <AppInner />;
