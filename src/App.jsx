@@ -2193,7 +2193,7 @@ function SettingsTab({settings,setSettings,items,setItems,liquor,setLiquor,purch
     show("Cleared");setCC(null);
   };
 
-  const exportData=()=>{
+  const exportData=async()=>{
     const payload=JSON.stringify({
       _version:V, _exported:new Date().toISOString(),
       items,purchases,walks,liquor,priceHist,scans,snaps,waste,recipes,settings,
@@ -2202,9 +2202,17 @@ function SettingsTab({settings,setSettings,items,setItems,liquor,setLiquor,purch
       gAndroidId:LS.get("bh_gclientid_android",""),
     },null,2);
     const name=`beacon-hills-backup-${new Date().toISOString().slice(0,10)}.json`;
+    const file=new File([payload],name,{type:"application/json"});
+    // On Android/native: use the share sheet so the user can pick where to save
+    if(Capacitor.isNativePlatform()&&navigator.canShare&&navigator.canShare({files:[file]})){
+      try{await navigator.share({files:[file],title:"Beacon Hills Backup"});}
+      catch(e){if(e?.name!=="AbortError")show("Could not open share sheet");}
+      return;
+    }
+    // Web / desktop fallback: trigger a download directly
     const a=Object.assign(document.createElement("a"),{href:URL.createObjectURL(new Blob([payload],{type:"application/json"})),download:name});
     a.click(); URL.revokeObjectURL(a.href);
-    show("Backup exported");
+    show("Backup downloaded");
   };
 
   const importData=e=>{
