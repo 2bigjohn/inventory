@@ -637,6 +637,7 @@ function CountTab({items,walks,updateItem,show,canFinance,settings}) {
   const [eq,setEQ]       = useState("");
   const [eo,setEO]       = useState(false);
   const [savedAt,setSavedAt] = useState(null);
+  const advTimer = useRef(null);
   // Saved count session for resume-after-interruption (walk + position)
   const [resume,setResume] = useState(() => {
     const s = LS.get(KEYS.countSession, null);
@@ -658,10 +659,23 @@ function CountTab({items,walks,updateItem,show,canFinance,settings}) {
 
   const markSaved = () => setSavedAt(Date.now());
   const endSession = () => { LS.set(KEYS.countSession, {mode:"picker"}); setResume(null); };
-  const nudge = d => { if(!fi_item)return; updateItem(fi_item.id,{qty:Math.max(0,parseFloat((fi_item.qty+d).toFixed(4)))}); markSaved(); };
-  const commit= () => { if(fi_item&&eq!==""){const v=parseFloat(eq);if(!isNaN(v)&&v>=0){updateItem(fi_item.id,{qty:v});markSaved();}}setEQ("");setEO(false); };
   const goNext= () => { if(fi>=visible.length-1){show("Count complete! ✓");endSession();setMode("list");}else setFI(i=>i+1);setEQ("");setEO(false); };
-  const goPrev= () => { setFI(i=>Math.max(0,i-1));setEQ("");setEO(false); };
+  const goPrev= () => { clearTimeout(advTimer.current); setFI(i=>Math.max(0,i-1));setEQ("");setEO(false); };
+  const nudge = d => {
+    if(!fi_item)return;
+    updateItem(fi_item.id,{qty:Math.max(0,parseFloat((fi_item.qty+d).toFixed(4)))});
+    markSaved();
+    // Auto-advance after 800ms of no further taps so rapid multi-taps still accumulate
+    clearTimeout(advTimer.current);
+    advTimer.current = setTimeout(goNext, 800);
+  };
+  const commit= () => {
+    if(fi_item&&eq!==""){const v=parseFloat(eq);if(!isNaN(v)&&v>=0){updateItem(fi_item.id,{qty:v});markSaved();}}
+    setEQ("");setEO(false);
+    // Advance immediately after typing an exact value
+    clearTimeout(advTimer.current);
+    goNext();
+  };
 
   if (mode==="picker") return (<>
     {resume && (() => {
