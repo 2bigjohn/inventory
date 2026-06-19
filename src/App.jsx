@@ -1578,6 +1578,13 @@ function PricesTab({items,setItems,liquor,setLiquor,priceHist,setPH,show,walks,s
     return{isSmart,rows};
   };
 
+  const SYSCO_CAT_MAP={
+    "Canned & Dry":"Food - Dry","Chemical & Janitorial":"Supplies",
+    "Dairy":"Food - Dairy","Frozen":"Food - Frozen",
+    "Meats":"Food - Protein","Poultry":"Food - Protein","Seafood":"Food - Protein",
+    "Produce":"Food - Produce","Supplies & Equipment":"Supplies",
+  };
+
   const parseSyscoCSV=(text,existingItems=[])=>{
     const lines=text.split("\n");
     let headerIdx=-1,headers=[];
@@ -1589,6 +1596,7 @@ function PricesTab({items,setItems,liquor,setLiquor,priceHist,setPH,show,walks,s
     const descIdx=headers.indexOf("Description");
     const priceIdx=headers.indexOf("Price");
     const unitIdx=headers.findIndex(h=>h.startsWith("CS/LB"));
+    const catIdx=headers.indexOf("Category");
     if(descIdx===-1||priceIdx===-1)return null;
     const rows=[];
     for(let i=headerIdx+1;i<lines.length;i++){
@@ -1600,7 +1608,9 @@ function PricesTab({items,setItems,liquor,setLiquor,priceHist,setPH,show,walks,s
       const unitCost=parseFloat((vals[priceIdx]||"").trim())||0;
       const rawUnit=unitIdx>=0?(vals[unitIdx]||"").trim().toUpperCase().replace(/\s+/g,""):"CS";
       const unit=rawUnit==="LB"?"lb":rawUnit==="EA"?"ea":"cs";
-      const entry={name:desc,unitCost,unit,matchExisting:false,existingName:""};
+      const syscoCat=catIdx>=0?(vals[catIdx]||"").trim():"";
+      const category=SYSCO_CAT_MAP[syscoCat]||"Food - Dry";
+      const entry={name:desc,unitCost,unit,category,matchExisting:false,existingName:""};
       const m=existingItems.find(x=>x.name.toLowerCase()===desc.toLowerCase());
       if(m){entry.matchExisting=true;entry.existingName=m.name;}
       rows.push(entry);
