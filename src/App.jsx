@@ -1270,6 +1270,8 @@ function GmailImport({setPurch,show}) {
   const [progress,setProg]   = useState(null);
   const [pending,setPend]    = useState([]);
   const [error,setErr]       = useState("");
+  const [nextPage,setNextPg] = useState(null);
+  const [pageStats,setPgSt]  = useState(null);
 
   const clientId       = LS.get("bh_gclientid_v6","");
   const androidId      = LS.get("bh_gclientid_android","");
@@ -1397,37 +1399,7 @@ function GmailImport({setPurch,show}) {
 
   const hdr = (msg,name) => msg.payload?.headers?.find(h=>h.name===name)?.value||"";
 
-  const fetchEmails = async tok => {
-    setLoad(true); setErr(""); setPend([]); setProg({stage:"Searching Gmail…",pct:10});
-    try {
-      const since = new Date(); since.setDate(since.getDate()-90);
-      const after = Math.floor(since.getTime()/1000);
-      const q = encodeURIComponent(
-        `(from:sysco OR from:usfoods OR from:"us foods" OR from:"gordon food" OR from:"restaurant depot" OR from:"performance food" OR from:shamrock OR from:"lone star" OR from:"fortune fish" OR from:loffredo OR from:reinhart OR from:"chef's warehouse" OR from:"chefs warehouse" OR from:pfg OR from:rndc OR from:"southern glazer" OR from:breakthru OR from:cintas OR from:ecolab OR subject:invoice OR subject:receipt OR subject:"order confirmation" OR subject:"delivery confirmation" OR subject:statement) after:${after}`
-      );
-      setProg({stage:"Searching Gmail…",pct:15});
-      const list = await gmailFetch(`https://www.googleapis.com/gmail/v1/users/me/messages?q=${q}&maxResults=100`,tok);
-      const msgs = list.messages||[];
-      if (!msgs.length) { setErr("No vendor emails found in the last 3 months."); setProg(null); setLoad(false); return; }
-
-      setProg({stage:`Found ${msgs.length} emails — reading…`,pct:20});
-      const bodies = [];
-      const limit = Math.min(msgs.length, 50);
-      for (let i=0; i<limit; i++) {
-        const msg = await gmailFetch(`https://www.googleapis.com/gmail/v1/users/me/messages/${msgs[i].id}?format=full`,tok);
-        bodies.push({
-          subject: hdr(msg,"Subject"),
-          from:    hdr(msg,"From"),
-          date:    hdr(msg,"Date"),
-          body:    extractBody(msg).slice(0,8000),
-        });
-        setProg({stage:`Reading emails… (${i+1}/${limit})`,pct:20+Math.round((i/limit)*45)});
-      }
-
-      setProg({stage:"Sending to AI…",pct:66});
-      const results = [];
-      const BATCH = 4;
-      const vendorGuide = `Vendor → category guide:
+  const VENDOR_GUIDE = `Vendor → category guide:
 - Fortune Fish & Gourmet / fortune fish → Food - Protein (seafood/fish)
 - Loffredo → Food - Produce or Food - Dry (Midwest grocery distributor)
 - Sysco / US Foods / Gordon Food / Reinhart / Performance Food / PFG → split by line items when possible; default Food - Misc
@@ -1438,14 +1410,63 @@ function GmailImport({setPurch,show}) {
 - RNDC / Southern Glazer / Breakthru / Republic → Liquor, Beer, or Wine (check line items)
 - Any beer-only distributor → Beer
 - Any wine-only merchant → Wine`;
+
+  const GMAIL_Q = after => `(from:sysco OR from:usfoods OR from:"us foods" OR from:"gordon food" OR from:"restaurant depot" OR from:"performance food" OR from:shamrock OR from:"lone star" OR from:"fortune fish" OR from:loffredo OR from:reinhart OR from:"chef's warehouse" OR from:"chefs warehouse" OR from:pfg OR from:rndc OR from:"southern glazer" OR from:breakthru OR from:cintas OR from:ecolab OR subject:invoice OR subject:receipt OR subject:"order confirmation" OR subject:"delivery confirmation" OR subject:statement) after:${after}`;
+
+  const fetchEmails = async (tok, pageToken=null) => {
+    const isFirstPage = !pageToken;
+    setLoad(true); setErr(""); setProg({stage:isFirstPage?"Searching Gmail…":"Loading next page…",pct:10});
+    if (isFirstPage) { setPend([]); setNextPg(null); setPgSt(null); }
+    try {
+      let listUrl;
+      if (isFirstPage) {
+        const since = new Date(); since.setDate(since.getDate()-90);
+        const after = Math.floor(since.getTime()/1000);
+        listUrl = `https://www.googleapis.com/gmail/v1/users/me/messages?q=${encodeURIComponent(GMAIL_Q(after))}&maxResults=50`;
+      } else {
+        listUrl = `https://www.googleapis.com/gmail/v1/users/me/messages?pageToken=${pageToken}&maxResults=50`;
+      }
+
+      setProg({stage:"Searching Gmail…",pct:15});
+      const list = await gmailFetch(listUrl, tok);
+      const msgs = list.messages||[];
+      setNextPg(list.nextPageToken||null);
+
+      if (!msgs.length) {
+        if (isFirstPage) { setErr("No vendor emails found in the last 3 months."); setProg(null); setLoad(false); return; }
+        setProg({stage:"Done — no more emails",pct:100}); setTimeout(()=>setProg(null),800); setLoad(false); return;
+      }
+
+      setPgSt(prev=>({
+        pagesLoaded:(prev?.pagesLoaded||0)+1,
+        emailsRead:(prev?.emailsRead||0)+msgs.length,
+        hasMore:!!list.nextPageToken,
+      }));
+      setProg({stage:`Found ${msgs.length} emails — reading…`,pct:20});
+
+      const bodies = [];
+      for (let i=0; i<msgs.length; i++) {
+        const msg = await gmailFetch(`https://www.googleapis.com/gmail/v1/users/me/messages/${msgs[i].id}?format=full`,tok);
+        bodies.push({
+          subject: hdr(msg,"Subject"),
+          from:    hdr(msg,"From"),
+          date:    hdr(msg,"Date"),
+          body:    extractBody(msg).slice(0,8000),
+        });
+        setProg({stage:`Reading emails… (${i+1}/${msgs.length})`,pct:20+Math.round((i/msgs.length)*45)});
+      }
+
+      setProg({stage:"Sending to AI…",pct:66});
+      const results = [];
+      const BATCH = 4;
       for (let i=0; i<bodies.length; i+=BATCH) {
         const chunk = bodies.slice(i,i+BATCH);
         const txt = chunk.map((e,n)=>`--- Email ${n+1} ---\nFrom: ${e.from}\nDate: ${e.date}\nSubject: ${e.subject}\n${e.body}`).join("\n\n");
         const parsed = await aiCall([{role:"user",content:`Extract all vendor purchase data from these emails for Beacon Hills restaurant (New Standard Hospitality).
 
-${vendorGuide}
+${VENDOR_GUIDE}
 
-SPLITTING RULE: If one invoice/statement contains line items across multiple cost categories (e.g. a Sysco order with proteins + produce + dry goods), create a SEPARATE entry for each category with the appropriate sub-total. Use the notes field to indicate it was split (e.g. "split from $2,400 invoice").
+SPLITTING RULE: If one invoice/statement covers multiple cost categories (e.g. a Sysco order with proteins + produce + dry goods), create a SEPARATE entry per category with the appropriate sub-total. Use notes to indicate it was split (e.g. "split from $2,400 invoice").
 
 Return ONLY valid JSON:
 {"purchases":[{"vendor":"","date":"YYYY-MM-DD","amount":0,"category":"Food - Misc","invoice":"","notes":"","confidence":"high|medium|low"}]}
@@ -1455,11 +1476,12 @@ Skip newsletters, promotions, shipping tracking with no dollar total, and non-fo
 
 ${txt}`}],6000);
         if (parsed.purchases?.length) results.push(...parsed.purchases);
-        setProg({stage:`Processing emails ${i+1}–${Math.min(i+BATCH,bodies.length)} of ${bodies.length}…`,pct:66+Math.round(((i+BATCH)/bodies.length)*30)});
+        setProg({stage:`AI processing ${i+1}–${Math.min(i+BATCH,bodies.length)} of ${bodies.length}…`,pct:66+Math.round(((i+BATCH)/bodies.length)*30)});
       }
 
       setProg({stage:"Done",pct:100});
-      setPend(results.filter(r=>r.amount>0).map(r=>({...r,selected:true})));
+      const fresh = results.filter(r=>r.amount>0).map(r=>({...r,selected:true}));
+      setPend(prev=>isFirstPage ? fresh : [...prev, ...fresh]);
       setTimeout(()=>setProg(null),800);
     } catch(e) { setErr(e.message||"Failed"); setProg(null); }
     finally { setLoad(false); }
@@ -1489,10 +1511,17 @@ ${txt}`}],6000);
       <span style={{fontFamily:mono,fontSize:10,color:C.muted}}>Last 3 months</span>
     </div>
     <div style={{padding:14}}>
-      <div style={{fontFamily:mono,fontSize:10,color:C.muted,lineHeight:1.7,marginBottom:12}}>Scans Gmail for vendor invoices &amp; payment confirmations and uses AI to extract and categorize each purchase.</div>
+      <div style={{fontFamily:mono,fontSize:10,color:C.muted,lineHeight:1.7,marginBottom:12}}>Scans Gmail for vendor invoices &amp; payment confirmations and uses AI to extract and categorize each purchase. Loads 50 emails at a time — use "Load more" to keep going.</div>
       {!token
         ? <button style={{...S.btn("blue"),width:"100%",justifyContent:"center",padding:"13px"}} onClick={connect} disabled={loading}>🔐 Connect Gmail</button>
         : <button style={{...S.btn("blue"),width:"100%",justifyContent:"center",padding:"13px"}} onClick={()=>fetchEmails(token)} disabled={loading}>🔄 Re-scan Gmail</button>}
+      {pageStats&&!loading&&(
+        <div style={{fontFamily:mono,fontSize:10,color:C.muted,marginTop:10,lineHeight:1.8}}>
+          Page {pageStats.pagesLoaded} · {pageStats.emailsRead} emails read · {pending.length} purchases found
+          {pageStats.hasMore&&<span style={{color:C.blue}}> · more available ↓</span>}
+          {!pageStats.hasMore&&<span style={{color:C.green}}> · all caught up</span>}
+        </div>
+      )}
       {loading&&<UploadProgress progress={progress} color={C.blue}/>}
       {error&&<div style={{background:`${C.red}15`,border:`1px solid ${C.red}40`,borderRadius:6,padding:11,marginTop:12,color:C.red,fontFamily:mono,fontSize:11}}>⚠ {error}</div>}
     </div></div>
@@ -1530,7 +1559,12 @@ ${txt}`}],6000);
             </div>
           </div>
         ))}
-        <div style={{padding:14}}>
+        <div style={{padding:14,display:"grid",gap:8}}>
+          {nextPage&&(
+            <button style={{...S.btn("blue"),width:"100%",justifyContent:"center",padding:"12px"}} onClick={()=>fetchEmails(token,nextPage)} disabled={loading}>
+              {loading?"Loading…":"Load next 50 emails →"}
+            </button>
+          )}
           <button style={{...S.btn(),width:"100%",justifyContent:"center",padding:"13px"}} onClick={apply}>
             Import {pending.filter(r=>r.selected).length} purchase{pending.filter(r=>r.selected).length!==1?"s":""} →
           </button>
