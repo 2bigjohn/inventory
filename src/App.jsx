@@ -2237,14 +2237,23 @@ function SettingsTab({settings,setSettings,items,setItems,liquor,setLiquor,purch
       gAndroidId:LS.get("bh_gclientid_android",""),
     },null,2);
     const name=`beacon-hills-backup-${new Date().toISOString().slice(0,10)}.json`;
-    const file=new File([payload],name,{type:"application/json"});
-    // On Android/native: use the share sheet so the user can pick where to save
-    if(Capacitor.isNativePlatform()&&navigator.canShare&&navigator.canShare({files:[file]})){
-      try{await navigator.share({files:[file],title:"Beacon Hills Backup"});}
-      catch(e){if(e?.name!=="AbortError")show("Could not open share sheet");}
+
+    if(Capacitor.isNativePlatform()){
+      try{
+        const {Filesystem,Directory}=await import("@capacitor/filesystem");
+        const {Share}=await import("@capacitor/share");
+        // Write to cache directory, then share so Android shows the save dialog
+        await Filesystem.writeFile({path:name,data:payload,directory:Directory.Cache,encoding:"utf8"});
+        const {uri}=await Filesystem.getUri({path:name,directory:Directory.Cache});
+        await Share.share({title:"Beacon Hills Backup",url:uri,dialogTitle:"Save or share backup"});
+      }catch(e){
+        if(e?.message?.includes("cancel")||e?.message?.includes("Cancel")||e?.name==="AbortError")return;
+        show("Share failed — check app permissions");
+      }
       return;
     }
-    // Web / desktop fallback: trigger a download directly
+
+    // Web fallback
     const a=Object.assign(document.createElement("a"),{href:URL.createObjectURL(new Blob([payload],{type:"application/json"})),download:name});
     a.click(); URL.revokeObjectURL(a.href);
     show("Backup downloaded");
