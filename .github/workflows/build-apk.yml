@@ -1,7 +1,7 @@
 name: Build Android APK
 on:
   push:
-    branches: [main, claude/app-testing-bugs-7zqhp0]
+    branches: [main, claude/app-testing-bugs-7zqhp0, claude/app-polish-user-ready-wbq0la]
   workflow_dispatch:
 jobs:
   build-apk:
