@@ -334,7 +334,7 @@ function LoginScreen({ onLogin }) {
         <button key={u.id} onClick={() => { setSelected(u.id); setPin(""); setError(""); }}
           style={{background:C.surface,border:`2px solid ${C.border}`,borderRadius:12,padding:"16px 18px",display:"flex",alignItems:"center",gap:14,cursor:"pointer",textAlign:"left",width:"100%"}}>
           <div style={{width:42,height:42,borderRadius:21,background:`${RC[u.role]||C.muted}22`,border:`2px solid ${RC[u.role]||C.muted}`,display:"flex",alignItems:"center",justifyContent:"center",fontFamily:mono,fontWeight:700,fontSize:16,color:RC[u.role]||C.muted,flexShrink:0}}>
-            {u.name[0].toUpperCase()}
+            {(u.name||"?")[0].toUpperCase()}
           </div>
           <div style={{flex:1}}>
             <div style={{fontWeight:700,fontSize:17,color:C.text}}>{u.name}</div>
@@ -350,7 +350,7 @@ function LoginScreen({ onLogin }) {
     <button onClick={() => { setSelected(null); setPin(""); setError(""); }}
       style={{position:"absolute",top:20,left:16,background:"none",border:"none",color:C.muted,fontSize:13,cursor:"pointer",fontFamily:mono}}>← Back</button>
     <div style={{width:56,height:56,borderRadius:28,background:`${RC[user?.role]||C.muted}22`,border:`2px solid ${RC[user?.role]||C.muted}`,display:"flex",alignItems:"center",justifyContent:"center",fontFamily:mono,fontWeight:700,fontSize:22,color:RC[user?.role]||C.muted,marginBottom:12}}>
-      {user?.name[0].toUpperCase()}
+      {(user?.name||"?")[0].toUpperCase()}
     </div>
     <div style={{fontWeight:700,fontSize:20,marginBottom:4}}>{user?.name}</div>
     <div style={{fontFamily:mono,fontSize:10,color:RC[user?.role]||C.muted,letterSpacing:2,marginBottom:noPIN?24:32}}>{user?.role?.toUpperCase()}</div>
@@ -532,9 +532,9 @@ function AppInner() {
           <button onClick={() => setCurrentUser(null)}
             style={{display:"flex",alignItems:"center",gap:6,background:"none",border:`1px solid ${ROLE_COLOR[role]||C.border}`,borderRadius:16,padding:"4px 10px",cursor:"pointer"}}>
             <div style={{width:18,height:18,borderRadius:9,background:`${ROLE_COLOR[role]||C.muted}33`,display:"flex",alignItems:"center",justifyContent:"center",fontFamily:mono,fontSize:10,fontWeight:700,color:ROLE_COLOR[role]||C.muted}}>
-              {currentUser.name[0].toUpperCase()}
+              {(currentUser.name||"?")[0].toUpperCase()}
             </div>
-            <span style={{fontFamily:mono,fontSize:9,color:ROLE_COLOR[role]||C.muted,letterSpacing:1}}>{currentUser.name.split(" ")[0].toUpperCase()}</span>
+            <span style={{fontFamily:mono,fontSize:9,color:ROLE_COLOR[role]||C.muted,letterSpacing:1}}>{(currentUser.name||"?").split(" ")[0].toUpperCase()}</span>
           </button>
         </div>
       </div>
@@ -570,13 +570,35 @@ function AppInner() {
 }
 
 // ─── HOME TAB ────────────────────────────────────────────────────────────────
-function HomeTab({totalFood,totalBev,totalInv,fcPct,fcColor,bevPct,bevColor,foodLow,liqLow,wasteCost,snaps,items,liquor,purchases,waste,settings,lockSnap,show,sales,setSales,canFinance,setTab}) {
+function HomeTab({totalFood,totalBev,totalInv,fcPct,fcColor,bevPct,bevColor,foodLow,liqLow,wasteCost,snaps,items,liquor,purchases,waste,settings,lockSnap,show,sales,setSales,canFinance,setTab,role}) {
   const [si, setSI] = useState(sales>0?String(sales):"");
   const last  = snaps[0];
   const fdDelta = last ? totalFood-last.totalFood : null;
   const bvDelta = last ? totalBev-last.totalBev   : null;
   const lowTotal = foodLow.length + liqLow.length;
+  const isEmpty  = items.length===0 && liquor.length===0;
   return (<>
+    {isEmpty && (
+      <div style={{...S.card,border:`1px solid ${C.amber}40`}}>
+        <div style={S.hd}><span style={S.title()}>👋 Welcome — Let's Get Started</span></div>
+        <div style={{padding:14,display:"grid",gap:10}}>
+          <div style={{fontFamily:mono,fontSize:11,color:C.textSoft,lineHeight:1.7}}>Your inventory is empty. Pick the fastest way to set it up:</div>
+          {(() => {
+            const steps = [];
+            if (role==="admin" && !LS.get("bh_apikey_v6","")) steps.push(["⚙","Add your AI key","Settings → unlocks photo scanning of count sheets & invoices","settings",C.amber]);
+            steps.push(["📷","Scan a count sheet","Snap a photo or upload a PDF/CSV — AI fills your inventory for you","scan",C.blue]);
+            steps.push(["📋","Or add items by hand","Build your item list manually in the Items tab","items",C.green]);
+            return steps.map(([icon,title,desc,tab,color])=>(
+              <button key={tab} onClick={()=>setTab(tab)} style={{background:C.surfaceAlt,border:`1px solid ${C.border}`,borderLeft:`3px solid ${color}`,borderRadius:8,padding:"12px 14px",textAlign:"left",cursor:"pointer",display:"flex",alignItems:"center",gap:12}}>
+                <div style={{fontSize:22}}>{icon}</div>
+                <div style={{flex:1}}><div style={{fontFamily:mono,fontSize:12,fontWeight:700,color}}>{title}</div><div style={{fontFamily:mono,fontSize:10,color:C.muted,marginTop:3}}>{desc}</div></div>
+                <div style={{fontFamily:mono,fontSize:16,color:C.muted}}>›</div>
+              </button>
+            ));
+          })()}
+        </div>
+      </div>
+    )}
     <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:14}}>
       {[["Total Inventory",fmt$(totalInv),C.amber],["Food Inventory",fmt$(totalFood),C.text],["Bar Inventory",fmt$(totalBev),C.purple],["Waste This Period",fmt$(wasteCost),wasteCost>0?C.red:C.muted]].map(([l,v,color])=>(
         <div key={l} style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:8,padding:"12px 14px"}}>
@@ -651,6 +673,9 @@ function CountTab({items,walks,updateItem,show,canFinance,settings}) {
     LS.set(KEYS.countSession, {mode,awId,fi,ts:Date.now()});
   }, [mode,awId,fi]);
 
+  // Cancel any pending auto-advance when leaving the count screen
+  useEffect(() => () => clearTimeout(advTimer.current), []);
+
   const ordered = awId ? (walks.find(w=>w.id===awId)?.itemIds.map(id=>items.find(i=>i.id===id)).filter(Boolean)||[]) : items;
   const cats    = ["All",...new Set(ordered.map(i=>i.category||"Other"))];
   const visible = ordered.filter(i=>(!search||i.name.toLowerCase().includes(search.toLowerCase()))&&(fcat==="All"||i.category===fcat));
@@ -659,7 +684,7 @@ function CountTab({items,walks,updateItem,show,canFinance,settings}) {
 
   const markSaved = () => setSavedAt(Date.now());
   const endSession = () => { LS.set(KEYS.countSession, {mode:"picker"}); setResume(null); };
-  const goNext= () => { if(fi>=visible.length-1){show("Count complete! ✓");endSession();setMode("list");}else setFI(i=>i+1);setEQ("");setEO(false); };
+  const goNext= () => { clearTimeout(advTimer.current); if(fi>=visible.length-1){show("Count complete! ✓");endSession();setMode("list");}else setFI(i=>i+1);setEQ("");setEO(false); };
   const goPrev= () => { clearTimeout(advTimer.current); setFI(i=>Math.max(0,i-1));setEQ("");setEO(false); };
   const nudge = d => {
     if(!fi_item)return;
@@ -2374,7 +2399,7 @@ function SettingsTab({settings,setSettings,items,setItems,liquor,setLiquor,purch
       </div>)}
       {(appUsers||[]).map(u=>(
         <div key={u.id} style={{padding:"10px 14px",borderBottom:`1px solid ${C.border}15`,display:"flex",alignItems:"center",gap:10}}>
-          <div style={{width:34,height:34,borderRadius:17,background:`${RC[u.role]||C.muted}22`,border:`2px solid ${RC[u.role]||C.muted}`,display:"flex",alignItems:"center",justifyContent:"center",fontFamily:mono,fontWeight:700,fontSize:14,color:RC[u.role]||C.muted,flexShrink:0}}>{u.name[0].toUpperCase()}</div>
+          <div style={{width:34,height:34,borderRadius:17,background:`${RC[u.role]||C.muted}22`,border:`2px solid ${RC[u.role]||C.muted}`,display:"flex",alignItems:"center",justifyContent:"center",fontFamily:mono,fontWeight:700,fontSize:14,color:RC[u.role]||C.muted,flexShrink:0}}>{(u.name||"?")[0].toUpperCase()}</div>
           <div style={{flex:1,minWidth:0}}>
             <div style={{fontWeight:600,fontSize:14}}>{u.name}{u.id===currentUser.id?" (you)":""}</div>
             <div style={{fontFamily:mono,fontSize:10,color:RC[u.role]||C.muted,letterSpacing:1,marginTop:2}}>{u.role.toUpperCase()} · {u.pin?"PIN set":"No PIN"}</div>
