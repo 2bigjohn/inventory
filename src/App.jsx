@@ -135,12 +135,26 @@ function autoAssign(itemList, walks) {
 
 // ─── CSV export ───────────────────────────────────────────────────────────────
 const toCSV = rows => rows.map(r => r.map(c => `"${String(c??'').replace(/"/g,'""')}"`).join(",")).join("\n");
-const dlCSV = (rows, name) => {
+const dlCSV = async (rows, name) => {
+  const csv = toCSV(rows);
+  // On Android the <a download> trick is a no-op in the WebView — share the file instead
+  if (Capacitor.isNativePlatform()) {
+    try {
+      const {Filesystem,Directory} = await import("@capacitor/filesystem");
+      const {Share} = await import("@capacitor/share");
+      await Filesystem.writeFile({path:name,data:csv,directory:Directory.Cache,encoding:"utf8"});
+      const {uri} = await Filesystem.getUri({path:name,directory:Directory.Cache});
+      await Share.share({title:name,url:uri,dialogTitle:"Save or share report"});
+    } catch(e) {
+      if (e?.message?.includes("cancel")||e?.message?.includes("Cancel")||e?.name==="AbortError") return;
+    }
+    return;
+  }
   const a = Object.assign(document.createElement("a"), {
-    href: URL.createObjectURL(new Blob([toCSV(rows)], {type:"text/csv"})),
+    href: URL.createObjectURL(new Blob([csv], {type:"text/csv"})),
     download: name,
   });
-  a.click();
+  a.click(); URL.revokeObjectURL(a.href);
 };
 
 // ─── AI call ─────────────────────────────────────────────────────────────────
@@ -334,7 +348,7 @@ function LoginScreen({ onLogin }) {
         <button key={u.id} onClick={() => { setSelected(u.id); setPin(""); setError(""); }}
           style={{background:C.surface,border:`2px solid ${C.border}`,borderRadius:12,padding:"16px 18px",display:"flex",alignItems:"center",gap:14,cursor:"pointer",textAlign:"left",width:"100%"}}>
           <div style={{width:42,height:42,borderRadius:21,background:`${RC[u.role]||C.muted}22`,border:`2px solid ${RC[u.role]||C.muted}`,display:"flex",alignItems:"center",justifyContent:"center",fontFamily:mono,fontWeight:700,fontSize:16,color:RC[u.role]||C.muted,flexShrink:0}}>
-            {u.name[0].toUpperCase()}
+            {(u.name||"?")[0].toUpperCase()}
           </div>
           <div style={{flex:1}}>
             <div style={{fontWeight:700,fontSize:17,color:C.text}}>{u.name}</div>
@@ -1727,10 +1741,10 @@ function PurchasesTab({purchases,setPurch,items,setItems,liquor,setLiquor,priceH
     if(!parsed)return;
     setPurch(p=>[{id:uid(),date:parsed.invoiceDate||today(),vendor:parsed.vendor||"Unknown",invoice:parsed.invoiceNum||"",amount:parsed.invoiceTotal||0,category:"Food - Misc",notes:`Parsed from ${parsed.sourceFile}`},...p]);
     const upd=[...items];
-    (parsed.lineItems||[]).forEach(li=>{if(li.unitCost>0){const k=li.matchExisting&&li.existingName?li.existingName:li.name;const i=upd.findIndex(x=>x.name===k||x.name.toLowerCase().includes(li.name.toLowerCase()));if(i>=0)upd[i]={...upd[i],unitCost:li.unitCost};}});
+    (parsed.lineItems||[]).forEach(li=>{const lname=(li.name||"").trim();if(!(li.unitCost>0)||!lname)return;const k=li.matchExisting&&li.existingName?li.existingName:lname;const i=upd.findIndex(x=>x.name===k||(x.name&&x.name.toLowerCase().includes(lname.toLowerCase())));if(i>=0)upd[i]={...upd[i],unitCost:li.unitCost};});
     setItems(upd);
     // Also update bar item costs
-    if(liquor&&setLiquor){const lUpd=[...liquor];(parsed.lineItems||[]).forEach(li=>{if(li.unitCost>0){const i=lUpd.findIndex(x=>x.name.toLowerCase().includes(li.name.toLowerCase()));if(i>=0)lUpd[i]={...lUpd[i],unitCost:li.unitCost};}});setLiquor(lUpd);}
+    if(liquor&&setLiquor){const lUpd=[...liquor];(parsed.lineItems||[]).forEach(li=>{const lname=(li.name||"").trim();if(!(li.unitCost>0)||!lname)return;const i=lUpd.findIndex(x=>x.name&&x.name.toLowerCase().includes(lname.toLowerCase()));if(i>=0)lUpd[i]={...lUpd[i],unitCost:li.unitCost};});setLiquor(lUpd);}
     setPH(p=>[{id:uid(),file:parsed.sourceFile,ts:new Date().toLocaleString(),prices:(parsed.lineItems||[]).map(li=>({name:li.name,unitCost:li.unitCost,unit:li.unit})),reportDate:parsed.invoiceDate,notes:parsed.notes},...p]);
     show(`Invoice from ${parsed.vendor||"vendor"} applied`);setParsed(null);setMode("list");
   };
@@ -1912,13 +1926,14 @@ function PricesTab({items,setItems,liquor,setLiquor,priceHist,setPH,show,walks,s
     const all=[...pending,...review.filter(r=>!r.skip)];
     const upd=[...items];
     all.forEach(pp=>{
-      const key=pp.matchExisting&&pp.existingName?pp.existingName:pp.name;
-      const idx=upd.findIndex(i=>i.name===key||i.name.toLowerCase()===pp.name.toLowerCase());
+      const pname=(pp.name||"").trim();if(!pname)return;
+      const key=pp.matchExisting&&pp.existingName?pp.existingName:pname;
+      const idx=upd.findIndex(i=>i.name===key||(i.name&&i.name.toLowerCase()===pname.toLowerCase()));
       if(idx>=0){upd[idx]={...upd[idx],unitCost:pp.reviewCost||pp.unitCost,unit:pp.reviewUnit||pp.unit};}
-      else{upd.push({id:uid(),name:pp.name,unit:pp.reviewUnit||pp.unit,qty:pp.qty||0,unitCost:pp.reviewCost||pp.unitCost,category:pp.category||"Other",par:0});}
+      else{upd.push({id:uid(),name:pname,unit:pp.reviewUnit||pp.unit,qty:pp.qty||0,unitCost:pp.reviewCost||pp.unitCost,category:pp.category||"Other",par:0});}
     });
     setItems(upd);
-    if(liquor&&setLiquor){const lUpd=[...liquor];all.forEach(pp=>{const i=lUpd.findIndex(l=>l.name.toLowerCase()===pp.name.toLowerCase());if(i>=0)lUpd[i]={...lUpd[i],unitCost:pp.reviewCost||pp.unitCost};});setLiquor(lUpd);}
+    if(liquor&&setLiquor){const lUpd=[...liquor];all.forEach(pp=>{const pname=(pp.name||"").trim();if(!pname)return;const i=lUpd.findIndex(l=>l.name&&l.name.toLowerCase()===pname.toLowerCase());if(i>=0)lUpd[i]={...lUpd[i],unitCost:pp.reviewCost||pp.unitCost};});setLiquor(lUpd);}
     if(walks&&setWalks)setWalks(autoAssign(upd,walks));
     setPend([]);setRev([]);setApplied(true);
     show(`${all.length} items imported · walks updated`);
@@ -2102,12 +2117,12 @@ function RecipeTab({recipes,setRecipes,items,liquor,settings,show,canFinance}) {
 // ─── REPORTS TAB ─────────────────────────────────────────────────────────────
 function ReportsTab({items,purchases,liquor,lqTotals,totalFood,totalPurch,totalBev,totalBevSales,bevSales,fcPct,bevPct,sales,walks,foodLow,liqLow,waste,settings,show,wasteCost,snaps,recipes}) {
   const expFood=()=>{
-    const ws=walks.flatMap(w=>{const wi=w.itemIds.map(id=>items.find(i=>i.id===id)).filter(Boolean);if(!wi.length)return[];return[[`--- ${w.name} ---`,"","","","",""],...wi.map(i=>[i.name,i.category,i.qty,i.unit,i.unitCost.toFixed(4),(i.qty*i.unitCost).toFixed(2)])]});
-    dlCSV([["BEACON HILLS — FOOD INVENTORY REPORT","","","","",""],["Generated:",new Date().toLocaleString(),"","","",""],["","","","","",""],["=== INVENTORY (WALK ORDER) ===","","","","",""],["Item","Category","Qty","Unit","Unit Cost","Value"],...ws,["","","","","TOTAL",totalFood.toFixed(2)],["","","","","",""],["=== PURCHASES ===","","","","",""],["Date","Vendor","Invoice","Category","Amount","Notes"],...purchases.map(p=>[p.date,p.vendor,p.invoice||"",p.category||"",p.amount.toFixed(2),p.notes||""]),["","","","","TOTAL",totalPurch.toFixed(2)],["","","","","",""],["=== FOOD COST ===","","","","",""],["Total Purchases","","","","",totalPurch.toFixed(2)],["Period Sales","","","","",sales.toFixed(2)],["Food Cost %","","","","",fcPct!==null?fmtPct(fcPct):"—"]],`BH_FoodReport_${today()}.csv`);show("Food report exported");
+    const ws=walks.flatMap(w=>{const wi=w.itemIds.map(id=>items.find(i=>i.id===id)).filter(Boolean);if(!wi.length)return[];return[[`--- ${w.name} ---`,"","","","",""],...wi.map(i=>[i.name,i.category,i.qty,i.unit,(i.unitCost||0).toFixed(4),((i.qty||0)*(i.unitCost||0)).toFixed(2)])]});
+    dlCSV([["BEACON HILLS — FOOD INVENTORY REPORT","","","","",""],["Generated:",new Date().toLocaleString(),"","","",""],["","","","","",""],["=== INVENTORY (WALK ORDER) ===","","","","",""],["Item","Category","Qty","Unit","Unit Cost","Value"],...ws,["","","","","TOTAL",totalFood.toFixed(2)],["","","","","",""],["=== PURCHASES ===","","","","",""],["Date","Vendor","Invoice","Category","Amount","Notes"],...purchases.map(p=>[p.date,p.vendor,p.invoice||"",p.category||"",(p.amount||0).toFixed(2),p.notes||""]),["","","","","TOTAL",totalPurch.toFixed(2)],["","","","","",""],["=== FOOD COST ===","","","","",""],["Total Purchases","","","","",totalPurch.toFixed(2)],["Period Sales","","","","",sales.toFixed(2)],["Food Cost %","","","","",fcPct!==null?fmtPct(fcPct):"—"]],`BH_FoodReport_${today()}.csv`);show("Food report exported");
   };
   const expBev=()=>{
     const cats=[{k:"spirits",l:"Spirits",t:[18,22]},{k:"beer",l:"Beer",t:[22,28]},{k:"wine",l:"Wine",t:[25,30]},{k:"na",l:"NA Bev",t:[20,30]}];
-    dlCSV([["BEACON HILLS — BEVERAGE COST REPORT","","",""],["Generated:",new Date().toLocaleString(),"",""],["","","",""],["=== LIQUOR INVENTORY ===","","","","",""],["Item","Category","Qty","Bottle Size","Cost","Value"],...liquor.map(l=>[l.name,l.category,l.qty,l.bottleSize,l.unitCost.toFixed(2),(l.qty*l.unitCost).toFixed(2)]),["","","","","TOTAL",totalBev.toFixed(2)],["","","","","",""],["=== BEV COST ===","","","","",""],["Category","Inv Value","Sales","Cost%","Target","Status"],...cats.map(c=>{const s=parseFloat(bevSales[c.k])||0;const p=s>0?(lqTotals[c.k]/s)*100:0;return[c.l,lqTotals[c.k].toFixed(2),s.toFixed(2),p>0?fmtPct(p):"—",`${c.t[0]}–${c.t[1]}%`,p>0&&p>c.t[1]?"OVER":p>0&&p<c.t[0]?"UNDER":p>0?"OK":"—"];}),["OVERALL",totalBev.toFixed(2),totalBevSales.toFixed(2),bevPct!==null?fmtPct(bevPct):"—","18–28%",""]],`BH_BevReport_${today()}.csv`);show("Bev report exported");
+    dlCSV([["BEACON HILLS — BEVERAGE COST REPORT","","",""],["Generated:",new Date().toLocaleString(),"",""],["","","",""],["=== LIQUOR INVENTORY ===","","","","",""],["Item","Category","Qty","Bottle Size","Cost","Value"],...liquor.map(l=>[l.name,l.category,l.qty,l.bottleSize,(l.unitCost||0).toFixed(2),((l.qty||0)*(l.unitCost||0)).toFixed(2)]),["","","","","TOTAL",totalBev.toFixed(2)],["","","","","",""],["=== BEV COST ===","","","","",""],["Category","Inv Value","Sales","Cost%","Target","Status"],...cats.map(c=>{const s=parseFloat(bevSales[c.k])||0;const p=s>0?((lqTotals[c.k]||0)/s)*100:0;return[c.l,(lqTotals[c.k]||0).toFixed(2),s.toFixed(2),p>0?fmtPct(p):"—",`${c.t[0]}–${c.t[1]}%`,p>0&&p>c.t[1]?"OVER":p>0&&p<c.t[0]?"UNDER":p>0?"OK":"—"];}),["OVERALL",totalBev.toFixed(2),totalBevSales.toFixed(2),bevPct!==null?fmtPct(bevPct):"—","18–28%",""]],`BH_BevReport_${today()}.csv`);show("Bev report exported");
   };
   const expOrder=()=>{
     const fr=foodLow.map(i=>[i.name,"Food",i.category,i.qty,i.par,(i.par-i.qty).toFixed(2),i.unit,fmt$((i.par-i.qty)*i.unitCost)]);
@@ -2121,7 +2136,7 @@ function ReportsTab({items,purchases,liquor,lqTotals,totalFood,totalPurch,totalB
     dlCSV([["BEACON HILLS — BLANK COUNT SHEET","","",""],["Date: ___________","Counter: ___________","",""],["","","",""],...ws],`BH_BlankSheet_${today()}.csv`);show("Blank sheet exported");
   };
   const expWaste=()=>{
-    dlCSV([["BEACON HILLS — WASTE REPORT","","","",""],["Generated:",new Date().toLocaleString(),"","",""],["Period Total:",fmt$(wasteCost),"","",""],["","","","",""],["Date","Item","Type","Qty","Cost","Notes"],...waste.map(w=>[w.date,w.itemName,w.type,w.qty,w.cost.toFixed(2),w.notes||""]),["","","","","TOTAL",wasteCost.toFixed(2)]],`BH_WasteReport_${today()}.csv`);show("Waste report exported");
+    dlCSV([["BEACON HILLS — WASTE REPORT","","","",""],["Generated:",new Date().toLocaleString(),"","",""],["Period Total:",fmt$(wasteCost),"","",""],["","","","",""],["Date","Item","Type","Qty","Cost","Notes"],...waste.map(w=>[w.date,w.itemName,w.type,w.qty,(w.cost||0).toFixed(2),w.notes||""]),["","","","","TOTAL",wasteCost.toFixed(2)]],`BH_WasteReport_${today()}.csv`);show("Waste report exported");
   };
   const expRecipes=()=>{
     const rows=recipes.flatMap(r=>{
@@ -2216,7 +2231,7 @@ function HistoryTab({snaps,setSnaps,lockSnap,show,canFinance}) {
 }
 
 // ─── SETTINGS TAB ────────────────────────────────────────────────────────────
-function SettingsTab({settings,setSettings,items,setItems,liquor,setLiquor,purchases,setPurch,waste,setWaste,snaps,setSnaps,scans,setScans,recipes,setRecipes,priceHist,setPH,walks,setWalks,show,role,appUsers,setAppUsers,currentUser,setCurrentUser}) {
+function SettingsTab({settings,setSettings,items,setItems,liquor,setLiquor,purchases,setPurch,waste,setWaste,snaps,setSnaps,scans,setScans,recipes,setRecipes,priceHist,setPH,walks,setWalks,sales,setSales,bevSales,setBevSales,show,role,appUsers,setAppUsers,currentUser,setCurrentUser}) {
   const upd=(k,v)=>setSettings(s=>({...s,[k]:v}));
   const [cc,setCC]=useState(null);
   const [eu,setEU]=useState(null); const [uf,setUF]=useState({name:"",role:"manager",pin:""});
@@ -2245,7 +2260,7 @@ function SettingsTab({settings,setSettings,items,setItems,liquor,setLiquor,purch
   const exportData=async()=>{
     const payload=JSON.stringify({
       _version:V, _exported:new Date().toISOString(),
-      items,purchases,walks,liquor,priceHist,scans,snaps,waste,recipes,settings,
+      items,purchases,walks,liquor,priceHist,scans,snaps,waste,recipes,settings,sales,bevSales,
       apiKey:LS.get("bh_apikey_v6",""),
       gClientId:LS.get("bh_gclientid_v6",""),
       gAndroidId:LS.get("bh_gclientid_android",""),
@@ -2279,16 +2294,21 @@ function SettingsTab({settings,setSettings,items,setItems,liquor,setLiquor,purch
     r.onload=ev=>{
       try{
         const d=JSON.parse(ev.target.result);
-        if(d.items)setItems(d.items);
-        if(d.purchases)setPurch(d.purchases);
-        if(d.walks)setWalks(d.walks);
-        if(d.liquor)setLiquor(d.liquor);
-        if(d.priceHist)setPH(d.priceHist);
-        if(d.scans)setScans(d.scans);
-        if(d.snaps)setSnaps(d.snaps);
-        if(d.waste)setWaste(d.waste);
-        if(d.recipes)setRecipes(d.recipes);
-        if(d.settings)setSettings(d.settings);
+        if(!d||typeof d!=="object"){show("Not a valid backup file");return;}
+        const num=(v,f=0)=>{const n=parseFloat(v);return isNaN(n)?f:n;};
+        const obj=x=>x&&typeof x==="object";
+        if(Array.isArray(d.items))setItems(d.items.filter(obj).map(i=>({...i,qty:num(i.qty),unitCost:num(i.unitCost),par:num(i.par)})));
+        if(Array.isArray(d.liquor))setLiquor(d.liquor.filter(obj).map(l=>({...l,qty:num(l.qty),unitCost:num(l.unitCost),par:num(l.par)})));
+        if(Array.isArray(d.purchases))setPurch(d.purchases.filter(obj).map(p=>({...p,amount:num(p.amount)})));
+        if(Array.isArray(d.waste))setWaste(d.waste.filter(obj).map(w=>({...w,qty:num(w.qty),cost:num(w.cost)})));
+        if(Array.isArray(d.walks))setWalks(d.walks);
+        if(Array.isArray(d.priceHist))setPH(d.priceHist);
+        if(Array.isArray(d.scans))setScans(d.scans);
+        if(Array.isArray(d.snaps))setSnaps(d.snaps);
+        if(Array.isArray(d.recipes))setRecipes(d.recipes);
+        if(obj(d.settings))setSettings({...DEFAULT_SETTINGS,...d.settings});
+        if(typeof d.sales!=="undefined")setSales(num(d.sales));
+        if(obj(d.bevSales))setBevSales(d.bevSales);
         if(d.apiKey){LS.set("bh_apikey_v6",d.apiKey);setApiKey(d.apiKey);}
         if(d.gClientId){LS.set("bh_gclientid_v6",d.gClientId);setGClientId(d.gClientId);}
         if(d.gAndroidId){LS.set("bh_gclientid_android",d.gAndroidId);setGAndroidId(d.gAndroidId);}
