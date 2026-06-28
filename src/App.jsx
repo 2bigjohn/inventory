@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect } from "react";
+import { Capacitor } from "@capacitor/core";
 
 // ─── Palette v2 ───────────────────────────────────────────────────────────────
 const C = {
@@ -15,11 +16,50 @@ const KEYS = {
   priceHist:`bh_prices_${V}`, walks:`bh_walks_${V}`, liquor:`bh_liquor_${V}`,
   bevSales:`bh_bevs_${V}`, snaps:`bh_snaps_${V}`, waste:`bh_waste_${V}`,
   recipes:`bh_recipes_${V}`, settings:`bh_settings_${V}`, users:`bh_users_${V}`,
-  sales:`bh_sales_${V}`,
+  sales:`bh_sales_${V}`, countSession:`bh_countsess_${V}`,
 };
+
+// Preferences is lazy-imported so web builds don't bundle it
+let _prefs = null;
+const getPrefsWithTimeout = () => {
+  if (!Capacitor.isNativePlatform()) return Promise.resolve(null);
+  if (!_prefs) {
+    const load = import("@capacitor/preferences").then(m => m.Preferences).catch(() => null);
+    const timeout = new Promise(res => setTimeout(() => res(null), 3000));
+    _prefs = Promise.race([load, timeout]);
+  }
+  return _prefs;
+};
+
 const LS = {
   get: (k, fb) => { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : fb; } catch { return fb; } },
-  set: (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} },
+  set: (k, v) => {
+    try { localStorage.setItem(k, JSON.stringify(v)); } catch {}
+    // async backup to Capacitor Preferences on native (fire-and-forget)
+    if (Capacitor.isNativePlatform()) {
+      getPrefsWithTimeout().then(p => p?.set({ key:k, value:JSON.stringify(v) })).catch(()=>{});
+    }
+  },
+  // Called once at startup on native: if localStorage is empty, restore from Preferences
+  restore: async () => {
+    if (!Capacitor.isNativePlatform()) return false;
+    // Check localStorage FIRST — skip the plugin entirely if data is already there
+    const hasLocal = Object.values(KEYS).some(k => localStorage.getItem(k));
+    if (hasLocal) return false;
+    // localStorage is empty — try to restore from Preferences (3s timeout)
+    const p = await getPrefsWithTimeout();
+    if (!p) return false;
+    let restored = false;
+    for (const k of Object.values(KEYS)) {
+      const { value } = await p.get({ key: k });
+      if (value) { localStorage.setItem(k, value); restored = true; }
+    }
+    for (const k of ["bh_apikey_v6","bh_gclientid_v6","bh_gclientid_android","bh_gclientsecret_android"]) {
+      const { value } = await p.get({ key: k });
+      if (value) localStorage.setItem(k, value);
+    }
+    return restored;
+  },
 };
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -69,6 +109,20 @@ const uid    = () => `${Date.now()}-${Math.random().toString(36).slice(2,6)}`;
 const today  = () => new Date().toISOString().slice(0,10);
 const b64    = f  => new Promise((res,rej) => { const r=new FileReader(); r.onload=()=>res(r.result.split(",")[1]); r.onerror=rej; r.readAsDataURL(f); });
 
+// On Android, file.type is often empty — derive it from the extension instead
+const imgExts = /\.(jpe?g|png|gif|webp|heic|heif)$/i;
+const fileMediaType = f => {
+  if (f.type) return f.type;
+  const ext = f.name.split(".").pop().toLowerCase();
+  return {jpg:"image/jpeg",jpeg:"image/jpeg",png:"image/png",gif:"image/gif",
+          webp:"image/webp",heic:"image/heic",heif:"image/heif",pdf:"application/pdf"}[ext] || "application/octet-stream";
+};
+const fileIsImg = f => fileMediaType(f).startsWith("image/") || imgExts.test(f.name);
+const aiContent = (f, d64) => ({
+  type: fileIsImg(f) ? "image" : "document",
+  source: { type:"base64", media_type: fileMediaType(f), data: d64 },
+});
+
 function autoAssign(itemList, walks) {
   const updated = walks.map(w => ({...w, itemIds:[...w.itemIds]}));
   itemList.forEach(item => {
@@ -81,12 +135,26 @@ function autoAssign(itemList, walks) {
 
 // ─── CSV export ───────────────────────────────────────────────────────────────
 const toCSV = rows => rows.map(r => r.map(c => `"${String(c??'').replace(/"/g,'""')}"`).join(",")).join("\n");
-const dlCSV = (rows, name) => {
+const dlCSV = async (rows, name) => {
+  const csv = toCSV(rows);
+  // On Android the <a download> trick is a no-op in the WebView — share the file instead
+  if (Capacitor.isNativePlatform()) {
+    try {
+      const {Filesystem,Directory} = await import("@capacitor/filesystem");
+      const {Share} = await import("@capacitor/share");
+      await Filesystem.writeFile({path:name,data:csv,directory:Directory.Cache,encoding:"utf8"});
+      const {uri} = await Filesystem.getUri({path:name,directory:Directory.Cache});
+      await Share.share({title:name,url:uri,dialogTitle:"Save or share report"});
+    } catch(e) {
+      if (e?.message?.includes("cancel")||e?.message?.includes("Cancel")||e?.name==="AbortError") return;
+    }
+    return;
+  }
   const a = Object.assign(document.createElement("a"), {
-    href: URL.createObjectURL(new Blob([toCSV(rows)], {type:"text/csv"})),
+    href: URL.createObjectURL(new Blob([csv], {type:"text/csv"})),
     download: name,
   });
-  a.click();
+  a.click(); URL.revokeObjectURL(a.href);
 };
 
 // ─── AI call ─────────────────────────────────────────────────────────────────
@@ -280,7 +348,7 @@ function LoginScreen({ onLogin }) {
         <button key={u.id} onClick={() => { setSelected(u.id); setPin(""); setError(""); }}
           style={{background:C.surface,border:`2px solid ${C.border}`,borderRadius:12,padding:"16px 18px",display:"flex",alignItems:"center",gap:14,cursor:"pointer",textAlign:"left",width:"100%"}}>
           <div style={{width:42,height:42,borderRadius:21,background:`${RC[u.role]||C.muted}22`,border:`2px solid ${RC[u.role]||C.muted}`,display:"flex",alignItems:"center",justifyContent:"center",fontFamily:mono,fontWeight:700,fontSize:16,color:RC[u.role]||C.muted,flexShrink:0}}>
-            {u.name[0].toUpperCase()}
+            {(u.name||"?")[0].toUpperCase()}
           </div>
           <div style={{flex:1}}>
             <div style={{fontWeight:700,fontSize:17,color:C.text}}>{u.name}</div>
@@ -330,7 +398,39 @@ function LoginScreen({ onLogin }) {
 }
 
 // ─── ROOT APP ─────────────────────────────────────────────────────────────────
+// Inject keyframe animations once at module level
+const _styleTag = document.createElement("style");
+_styleTag.textContent = `
+  @keyframes bh-pulse{0%,100%{opacity:.3}50%{opacity:1}}
+  @keyframes bh-bar{0%{width:0%}60%{width:75%}90%{width:92%}100%{width:95%}}
+`;
+document.head.appendChild(_styleTag);
+
+// Shell handles the one-time async Preferences restore on native Android.
+// Once ready it renders AppInner, which initialises all state from localStorage
+// (which by then has been populated from Preferences if needed).
 export default function App() {
+  const [storeReady, setStoreReady] = useState(!Capacitor.isNativePlatform());
+  useEffect(() => {
+    if (storeReady) return;
+    LS.restore().then(restored => {
+      if (restored) window.location.reload();
+      else setStoreReady(true);
+    });
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  if (!storeReady) return (
+    <div style={{background:C.bg,height:"100dvh",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:24}}>
+      <div style={{width:48,height:48,background:C.amber,borderRadius:10,display:"flex",alignItems:"center",justifyContent:"center",fontFamily:mono,fontWeight:700,color:"#000",fontSize:20}}>BH</div>
+      <div style={{fontFamily:mono,fontSize:11,color:C.amber,letterSpacing:4,animation:"bh-pulse 1.4s ease-in-out infinite"}}>LOADING…</div>
+      <div style={{width:180,height:3,background:`${C.amber}20`,borderRadius:2,overflow:"hidden"}}>
+        <div style={{height:"100%",background:C.amber,borderRadius:2,animation:"bh-bar 3s ease-out forwards"}}/>
+      </div>
+    </div>
+  );
+  return <AppInner />;
+}
+
+function AppInner() {
   const [currentUser, setCurrentUser] = useState(null);
   const [tab,  setTab]    = useState("home");
   const [items,    setItems]    = useState(() => LS.get(KEYS.items,    []));
@@ -347,7 +447,7 @@ export default function App() {
   const [toast,    setToast]    = useState("");
   const [sales,    setSales]    = useState(()=>LS.get(KEYS.sales,0));
 
-  // All persist effects BEFORE auth gate
+  // All persist effects — write to localStorage AND async-backup to Preferences
   useEffect(() => LS.set(KEYS.items,    items),    [items]);
   useEffect(() => LS.set(KEYS.purchases,purchases),[purchases]);
   useEffect(() => LS.set(KEYS.scans,    scans),    [scans]);
@@ -550,6 +650,20 @@ function CountTab({items,walks,updateItem,show,canFinance,settings}) {
   const [fcat,setFCat]   = useState("All");
   const [eq,setEQ]       = useState("");
   const [eo,setEO]       = useState(false);
+  const [savedAt,setSavedAt] = useState(null);
+  const advTimer = useRef(null);
+  // Saved count session for resume-after-interruption (walk + position)
+  const [resume,setResume] = useState(() => {
+    const s = LS.get(KEYS.countSession, null);
+    return s && s.mode && s.mode!=="picker" ? s : null;
+  });
+
+  // Autosave the count session (which walk + where you are) whenever it changes.
+  // Quantities themselves already persist via updateItem → items effect.
+  useEffect(() => {
+    if (mode==="picker") return;
+    LS.set(KEYS.countSession, {mode,awId,fi,ts:Date.now()});
+  }, [mode,awId,fi]);
 
   const ordered = awId ? (walks.find(w=>w.id===awId)?.itemIds.map(id=>items.find(i=>i.id===id)).filter(Boolean)||[]) : items;
   const cats    = ["All",...new Set(ordered.map(i=>i.category||"Other"))];
@@ -557,12 +671,44 @@ function CountTab({items,walks,updateItem,show,canFinance,settings}) {
   const fi_item = visible[fi]||null;
   const wname   = awId?(walks.find(w=>w.id===awId)?.name||"Walk"):"All Items";
 
-  const nudge = d => { if(!fi_item)return; updateItem(fi_item.id,{qty:Math.max(0,parseFloat((fi_item.qty+d).toFixed(4)))}); };
-  const commit= () => { if(fi_item&&eq!==""){const v=parseFloat(eq);if(!isNaN(v)&&v>=0)updateItem(fi_item.id,{qty:v});}setEQ("");setEO(false); };
-  const goNext= () => { if(fi>=visible.length-1){show("Count complete! ✓");setMode("list");}else setFI(i=>i+1);setEQ("");setEO(false); };
-  const goPrev= () => { setFI(i=>Math.max(0,i-1));setEQ("");setEO(false); };
+  const markSaved = () => setSavedAt(Date.now());
+  const endSession = () => { LS.set(KEYS.countSession, {mode:"picker"}); setResume(null); };
+  const goNext= () => { if(fi>=visible.length-1){show("Count complete! ✓");endSession();setMode("list");}else setFI(i=>i+1);setEQ("");setEO(false); };
+  const goPrev= () => { clearTimeout(advTimer.current); setFI(i=>Math.max(0,i-1));setEQ("");setEO(false); };
+  const nudge = d => {
+    if(!fi_item)return;
+    updateItem(fi_item.id,{qty:Math.max(0,parseFloat((fi_item.qty+d).toFixed(4)))});
+    markSaved();
+    // Auto-advance after 800ms of no further taps so rapid multi-taps still accumulate
+    clearTimeout(advTimer.current);
+    advTimer.current = setTimeout(goNext, 800);
+  };
+  const commit= () => {
+    if(fi_item&&eq!==""){const v=parseFloat(eq);if(!isNaN(v)&&v>=0){updateItem(fi_item.id,{qty:v});markSaved();}}
+    setEQ("");setEO(false);
+    // Advance immediately after typing an exact value
+    clearTimeout(advTimer.current);
+    goNext();
+  };
 
   if (mode==="picker") return (<>
+    {resume && (() => {
+      const rw = resume.awId ? walks.find(w=>w.id===resume.awId) : null;
+      const rname = resume.awId ? (rw?.name||"a walk") : "All Items";
+      return (
+        <div style={{...S.card,marginBottom:10,border:`1px solid ${C.amber}`}}>
+          <div style={{padding:14,display:"flex",alignItems:"center",gap:12}}>
+            <div style={{fontSize:24}}>⏸</div>
+            <div style={{flex:1,minWidth:0}}>
+              <div style={{fontWeight:700,fontSize:13,color:C.amber}}>Resume count in progress</div>
+              <div style={{fontFamily:mono,fontSize:10,color:C.muted,marginTop:2}}>{rname} · item {(resume.fi||0)+1}{resume.ts?` · saved ${new Date(resume.ts).toLocaleTimeString([],{hour:"numeric",minute:"2-digit"})}`:""}</div>
+            </div>
+            <button style={{...S.btn("primary"),padding:"8px 14px"}} onClick={()=>{setAW(resume.awId);setFI(resume.fi||0);setMode(resume.mode==="focus"?"focus":"list");setResume(null);}}>Resume →</button>
+            <button style={{...S.btn("secondary"),padding:"8px 10px"}} onClick={endSession}>✕</button>
+          </div>
+        </div>
+      );
+    })()}
     <div style={S.card}><div style={S.hd}><span style={S.title()}>Choose Walk</span></div>
       <div style={{padding:14,display:"grid",gap:10}}>
         {walks.filter(w=>w.itemIds.length>0).map(w=>{
@@ -598,8 +744,11 @@ function CountTab({items,walks,updateItem,show,canFinance,settings}) {
           <button style={{...S.btn(fi>=visible.length-1?"primary":"secondary"),padding:"7px 12px"}} onClick={goNext}>{fi>=visible.length-1?"Done ✓":"▶"}</button>
         </div>
       </div>
-      <div style={{height:3,background:C.surfaceAlt,borderRadius:2,marginBottom:18}}>
+      <div style={{height:3,background:C.surfaceAlt,borderRadius:2,marginBottom:8}}>
         <div style={{height:"100%",width:`${((fi+1)/visible.length)*100}%`,background:C.amber,borderRadius:2,transition:"width .25s"}}/>
+      </div>
+      <div style={{textAlign:"center",fontFamily:mono,fontSize:9,color:savedAt?C.green:C.muted,letterSpacing:1,marginBottom:14}}>
+        {savedAt?`✓ Saved ${new Date(savedAt).toLocaleTimeString([],{hour:"numeric",minute:"2-digit",second:"2-digit"})}`:"⟳ Autosaves as you count"}
       </div>
       <div style={{background:C.surface,border:`1px solid ${bp?C.red:C.border}`,borderRadius:12,padding:18,marginBottom:14}}>
         <div style={{fontFamily:mono,fontSize:10,color:C.amber,letterSpacing:2,marginBottom:6}}>{fi_item.category}</div>
@@ -679,22 +828,39 @@ function WalkTab({items,walks,setWalks,show,canFinance}) {
   const [search,setSrch] = useState("");
   const [dragIdx,setDI]  = useState(null);
   const [overIdx,setOI]  = useState(null);
+  const [sort,setSort]   = useState({field:"order",dir:"asc"});
+  const [filter,setFilt] = useState("");
+  const [movingId,setMov]= useState(null);
   const lpt              = useRef(null);
 
-  const walk      = walks.find(w=>w.id===aw);
-  const walkItems = walk ? walk.itemIds.map(id=>items.find(i=>i.id===id)).filter(Boolean) : [];
-  const unassigned= items.filter(i=>!walk?.itemIds.includes(i.id)&&(!search||i.name.toLowerCase().includes(search.toLowerCase())));
-  const totalUnassigned = items.filter(i=>!walks.some(w=>w.itemIds.includes(i.id))).length;
-  const walkVal    = walkItems.reduce((s,i)=>s+i.qty*i.unitCost,0);
+  const walk     = walks.find(w=>w.id===aw);
+  const rawItems = walk ? walk.itemIds.map(id=>items.find(i=>i.id===id)).filter(Boolean) : [];
 
-  const addWalk = () => { if(!nn.trim())return; const w={id:uid(),name:nn.trim(),emoji:ne,itemIds:[]}; setWalks(p=>[...p,w]); setAW(w.id); setNN(""); setCr(false); show(`Walk "${w.name}" created`); };
-  const delWalk = id => { setWalks(p=>p.filter(w=>w.id!==id)); setAW(walks.find(w=>w.id!==id)?.id||null); };
-  const addItem = id => setWalks(p=>p.map(w=>w.id===aw?{...w,itemIds:[...w.itemIds,id]}:w));
-  const remItem = id => setWalks(p=>p.map(w=>w.id===aw?{...w,itemIds:w.itemIds.filter(x=>x!==id)}:w));
-  const reorder = (from,to) => { if(from===to||to===null)return; setWalks(p=>p.map(w=>{ if(w.id!==aw)return w; const ids=[...w.itemIds]; const[m]=ids.splice(from,1); ids.splice(to,0,m); return{...w,itemIds:ids}; })); };
-  const autoAll = () => { setWalks(autoAssign(items,walks)); show("All items assigned to walks"); };
+  const sorted = sort.field==="order" ? rawItems : [...rawItems].sort((a,b)=>{
+    let av,bv;
+    if(sort.field==="name"){av=a.name.toLowerCase();bv=b.name.toLowerCase();}
+    else if(sort.field==="category"){av=(a.category||"").toLowerCase();bv=(b.category||"").toLowerCase();}
+    else if(sort.field==="qty"){av=a.qty;bv=b.qty;}
+    else{av=a.unitCost;bv=b.unitCost;}
+    return (av<bv?-1:av>bv?1:0)*(sort.dir==="asc"?1:-1);
+  });
+  const walkItems = filter ? sorted.filter(i=>i.name.toLowerCase().includes(filter.toLowerCase())||i.category?.toLowerCase().includes(filter.toLowerCase())) : sorted;
+  const canDrag   = sort.field==="order" && !filter;
+
+  const unassigned     = items.filter(i=>!walk?.itemIds.includes(i.id)&&(!search||i.name.toLowerCase().includes(search.toLowerCase())));
+  const totalUnassigned= items.filter(i=>!walks.some(w=>w.itemIds.includes(i.id))).length;
+
+  const addWalk  = () => { if(!nn.trim())return; const w={id:uid(),name:nn.trim(),emoji:ne,itemIds:[]}; setWalks(p=>[...p,w]); setAW(w.id); setNN(""); setCr(false); show(`Walk "${w.name}" created`); };
+  const delWalk  = id => { setWalks(p=>p.filter(w=>w.id!==id)); setAW(walks.find(w=>w.id!==id)?.id||null); };
+  const addItem  = id => setWalks(p=>p.map(w=>w.id===aw?{...w,itemIds:[...w.itemIds,id]}:w));
+  const remItem  = id => { setWalks(p=>p.map(w=>w.id===aw?{...w,itemIds:w.itemIds.filter(x=>x!==id)}:w)); if(movingId===id)setMov(null); };
+  const moveItem = (id,toId) => { setWalks(p=>p.map(w=>w.id===aw?{...w,itemIds:w.itemIds.filter(x=>x!==id)}:w.id===toId?{...w,itemIds:[...w.itemIds,id]}:w)); setMov(null); };
+  const reorder  = (from,to) => { if(from===to||to===null)return; setWalks(p=>p.map(w=>{ if(w.id!==aw)return w; const ids=[...w.itemIds]; const[m]=ids.splice(from,1); ids.splice(to,0,m); return{...w,itemIds:ids}; })); };
+  const autoAll  = () => { setWalks(autoAssign(items,walks)); show("All items assigned to walks"); };
+  const cycleSort= field => setSort(s=>s.field===field?{field,dir:s.dir==="asc"?"desc":"asc"}:{field,dir:"asc"});
 
   const EMOJIS = ["📦","🥩","🥫","❄️","🍺","🍷","🥦","🧀","🧂","🫙","🍳","🗄️"];
+  const SortChip = ({field,label}) => { const on=sort.field===field; return <button onClick={()=>cycleSort(field)} style={{padding:"5px 10px",borderRadius:12,border:`1px solid ${on?C.amber:C.border}`,background:on?`${C.amber}18`:"none",color:on?C.amber:C.muted,fontFamily:mono,fontSize:10,cursor:"pointer",whiteSpace:"nowrap"}}>{label}{on?(sort.dir==="asc"?" ↑":" ↓"):""}</button>; };
 
   return (<>
     {totalUnassigned>0&&(
@@ -705,7 +871,7 @@ function WalkTab({items,walks,setWalks,show,canFinance}) {
     )}
     <div style={{display:"flex",gap:8,overflowX:"auto",paddingBottom:4,marginBottom:12}}>
       {walks.map(w=>(
-        <button key={w.id} onClick={()=>setAW(w.id)}
+        <button key={w.id} onClick={()=>{setAW(w.id);setFilt("");setMov(null);setSrch("");}}
           style={{flex:"0 0 auto",padding:"8px 14px",borderRadius:20,border:`2px solid ${aw===w.id?C.amber:C.border}`,background:aw===w.id?`${C.amber}18`:C.surface,color:aw===w.id?C.amber:C.muted,fontFamily:mono,fontSize:11,cursor:"pointer",whiteSpace:"nowrap",display:"flex",alignItems:"center",gap:6}}>
           {w.emoji} {w.name} ({w.itemIds.length})
         </button>
@@ -726,43 +892,75 @@ function WalkTab({items,walks,setWalks,show,canFinance}) {
     {walk&&(
       <div style={S.card}>
         <div style={S.hd}>
-          <span style={S.title()}>{walk.emoji} {walk.name} — {walkItems.length} items{canFinance?` · ${fmt$(walkVal)}`:""}</span>
+          <span style={S.title()}>{walk.emoji} {walk.name} — {walkItems.length}{filter||sort.field!=="order"?`/${rawItems.length}`:""} items{canFinance?` · ${fmt$(rawItems.reduce((s,i)=>s+i.qty*i.unitCost,0))}`:""}</span>
           <div style={{display:"flex",gap:8}}>
-            <button style={{...S.btn("blue"),padding:"7px 12px",fontSize:10}} onClick={()=>setPick(!picking)}>{picking?"← Done":"+ Add Items"}</button>
+            <button style={{...S.btn("blue"),padding:"7px 12px",fontSize:10}} onClick={()=>{setPick(p=>!p);setMov(null);}}>{picking?"← Done":"+ Add"}</button>
             {walks.length>1&&<button style={{...S.btn("ghost"),padding:"7px 10px",color:C.red,fontSize:16}} onClick={()=>delWalk(walk.id)}>🗑</button>}
           </div>
         </div>
-        {walkItems.length===0&&!picking&&<div style={{padding:28,textAlign:"center",color:C.muted,fontFamily:mono,fontSize:11}}>No items. Tap "+ Add Items".</div>}
+
+        {!picking&&rawItems.length>0&&(
+          <div style={{padding:"8px 14px 8px",borderBottom:`1px solid ${C.border}`,display:"flex",gap:6,flexWrap:"wrap",alignItems:"center"}}>
+            <input style={{...S.inp,flex:"1 1 130px",padding:"6px 10px",fontSize:11,minWidth:0}} placeholder="🔍 Filter…" value={filter} onChange={e=>{setFilt(e.target.value);setMov(null);}}/>
+            <SortChip field="name" label="Name"/>
+            <SortChip field="category" label="Category"/>
+            <SortChip field="qty" label="Qty"/>
+            {canFinance&&<SortChip field="cost" label="Cost"/>}
+            {sort.field!=="order"&&<button onClick={()=>setSort({field:"order",dir:"asc"})} style={{padding:"5px 10px",borderRadius:12,border:`1px solid ${C.border}`,background:"none",color:C.muted,fontFamily:mono,fontSize:10,cursor:"pointer"}}>↕ Manual</button>}
+          </div>
+        )}
+
+        {walkItems.length===0&&!picking&&(
+          <div style={{padding:28,textAlign:"center",color:C.muted,fontFamily:mono,fontSize:11}}>
+            {filter?"No matches — clear filter to see all.":rawItems.length===0?`No items. Tap "+ Add".`:""}
+          </div>
+        )}
+
         {!picking&&walkItems.length>0&&(
           <div>
-            <div style={{padding:"5px 14px 4px",fontFamily:mono,fontSize:9,color:C.muted,letterSpacing:2,borderBottom:`1px solid ${C.border}`}}>HOLD & DRAG TO REORDER</div>
-            <div onTouchMove={e=>{if(dragIdx===null)return;e.preventDefault();const y=e.touches[0].clientY;let found=null;document.querySelectorAll("[data-wr]").forEach((r,i)=>{const rc=r.getBoundingClientRect();if(y>=rc.top&&y<=rc.bottom)found=i;});setOI(found);}} onTouchEnd={()=>{clearTimeout(lpt.current);if(dragIdx!==null&&overIdx!==null)reorder(dragIdx,overIdx);setDI(null);setOI(null);}}>
+            {canDrag&&<div style={{padding:"4px 14px",fontFamily:mono,fontSize:9,color:C.muted,letterSpacing:2,borderBottom:`1px solid ${C.border}`}}>HOLD & DRAG TO REORDER</div>}
+            <div onTouchMove={e=>{if(!canDrag||dragIdx===null)return;e.preventDefault();const y=e.touches[0].clientY;let found=null;document.querySelectorAll("[data-wr]").forEach((r,i)=>{const rc=r.getBoundingClientRect();if(y>=rc.top&&y<=rc.bottom)found=i;});setOI(found);}} onTouchEnd={()=>{clearTimeout(lpt.current);if(canDrag&&dragIdx!==null&&overIdx!==null)reorder(dragIdx,overIdx);setDI(null);setOI(null);}}>
               {walkItems.map((item,idx)=>{
-                const isDrag=dragIdx===idx, isOver=overIdx===idx&&dragIdx!==null&&dragIdx!==idx;
-                return (<div key={item.id} data-wr draggable
-                  onDragStart={()=>setDI(idx)} onDragOver={e=>{e.preventDefault();setOI(idx);}} onDrop={()=>reorder(dragIdx,idx)}
-                  onTouchStart={e=>{lpt.current=setTimeout(()=>setDI(idx),350);}}
-                  style={{display:"flex",alignItems:"center",gap:10,padding:"11px 14px",borderBottom:`1px solid ${C.border}15`,background:isDrag?`${C.amber}18`:isOver?`${C.blue}15`:"transparent",borderTop:isOver?`2px solid ${C.blue}`:"2px solid transparent",opacity:isDrag?0.5:1,userSelect:"none",touchAction:"none",cursor:"grab"}}>
-                  <div style={{fontFamily:mono,fontSize:12,color:C.amber,fontWeight:700,width:22,textAlign:"center",flexShrink:0}}>{idx+1}</div>
-                  <div style={{color:C.border,fontSize:14,flexShrink:0}}>⠿</div>
-                  <div style={{flex:1,minWidth:0}}>
-                    <div style={{fontWeight:600,fontSize:13,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{item.name||"Unnamed"}</div>
-                    <div style={{fontFamily:mono,fontSize:10,color:C.muted}}>{item.category} · {item.unit}</div>
+                const isDrag=canDrag&&dragIdx===idx, isOver=canDrag&&overIdx===idx&&dragIdx!==null&&dragIdx!==idx, isMov=movingId===item.id;
+                return (
+                  <div key={item.id} data-wr={canDrag?true:undefined} draggable={canDrag}
+                    onDragStart={canDrag?()=>setDI(idx):undefined} onDragOver={canDrag?e=>{e.preventDefault();setOI(idx);}:undefined} onDrop={canDrag?()=>reorder(dragIdx,idx):undefined}
+                    onTouchStart={canDrag?()=>{lpt.current=setTimeout(()=>setDI(idx),350);}:undefined}
+                    style={{borderBottom:`1px solid ${C.border}15`,background:isDrag?`${C.amber}18`:isOver?`${C.blue}15`:isMov?`${C.blue}08`:"transparent",borderTop:isOver?`2px solid ${C.blue}`:"2px solid transparent",opacity:isDrag?0.5:1,userSelect:"none",touchAction:canDrag?"none":"auto",cursor:canDrag?"grab":"default"}}>
+                    <div style={{display:"flex",alignItems:"center",gap:10,padding:"11px 14px"}}>
+                      {canDrag&&<div style={{fontFamily:mono,fontSize:12,color:C.amber,fontWeight:700,width:22,textAlign:"center",flexShrink:0}}>{idx+1}</div>}
+                      {canDrag&&<div style={{color:C.border,fontSize:14,flexShrink:0}}>⠿</div>}
+                      <div style={{flex:1,minWidth:0}}>
+                        <div style={{fontWeight:600,fontSize:13,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{item.name||"Unnamed"}</div>
+                        <div style={{fontFamily:mono,fontSize:10,color:C.muted}}>{item.category} · {item.unit}</div>
+                      </div>
+                      <div style={{flexShrink:0,textAlign:"right",marginRight:4}}>
+                        <div style={{fontFamily:mono,fontSize:14,fontWeight:700,color:item.par>0&&item.qty<item.par?C.red:C.muted}}>{item.qty}</div>
+                        {canFinance&&<div style={{fontFamily:mono,fontSize:10,color:C.muted}}>{fmt$(item.qty*item.unitCost)}</div>}
+                      </div>
+                      <button onClick={()=>setMov(isMov?null:item.id)} title="Move to walk" style={{background:isMov?`${C.blue}25`:"none",border:`1px solid ${isMov?C.blue:C.border}`,borderRadius:6,color:isMov?C.blue:C.muted,fontSize:13,cursor:"pointer",padding:"5px 8px",flexShrink:0}}>↗</button>
+                      <button onClick={()=>remItem(item.id)} style={{background:"none",border:"none",color:C.red,fontSize:18,cursor:"pointer",padding:"2px 6px",flexShrink:0}}>✕</button>
+                    </div>
+                    {isMov&&(
+                      <div style={{padding:"0 14px 12px 14px",display:"flex",gap:6,flexWrap:"wrap",alignItems:"center"}}>
+                        <span style={{fontFamily:mono,fontSize:10,color:C.muted,flexShrink:0}}>Move to:</span>
+                        {walks.filter(w=>w.id!==aw).map(w=>(
+                          <button key={w.id} onClick={()=>moveItem(item.id,w.id)} style={{padding:"5px 12px",borderRadius:14,border:`1px solid ${C.blue}40`,background:`${C.blue}15`,color:C.blue,fontFamily:mono,fontSize:11,cursor:"pointer"}}>{w.emoji} {w.name}</button>
+                        ))}
+                        <button onClick={()=>setMov(null)} style={{padding:"5px 10px",borderRadius:14,border:`1px solid ${C.border}`,background:"none",color:C.muted,fontFamily:mono,fontSize:11,cursor:"pointer"}}>Cancel</button>
+                      </div>
+                    )}
                   </div>
-                  <div style={{flexShrink:0,textAlign:"right"}}>
-                    <div style={{fontFamily:mono,fontSize:14,fontWeight:700,color:item.par>0&&item.qty<item.par?C.red:C.muted}}>{item.qty}</div>
-                    {canFinance&&<div style={{fontFamily:mono,fontSize:10,color:C.muted}}>{fmt$(item.qty*item.unitCost)}</div>}
-                  </div>
-                  <button onClick={()=>remItem(item.id)} style={{background:"none",border:"none",color:C.red,fontSize:18,cursor:"pointer",padding:"2px 6px",flexShrink:0}}>✕</button>
-                </div>);
+                );
               })}
             </div>
           </div>
         )}
+
         {picking&&(
           <div>
-            <div style={{padding:"10px 14px 6px"}}><input style={S.inp} placeholder="Search…" value={search} onChange={e=>setSrch(e.target.value)}/></div>
-            {unassigned.length===0&&<div style={{padding:20,textAlign:"center",color:C.muted,fontFamily:mono,fontSize:11}}>{search?"No matches.":"All items assigned."}</div>}
+            <div style={{padding:"10px 14px 6px"}}><input style={S.inp} placeholder="Search items to add…" value={search} onChange={e=>setSrch(e.target.value)}/></div>
+            {unassigned.length===0&&<div style={{padding:20,textAlign:"center",color:C.muted,fontFamily:mono,fontSize:11}}>{search?"No matches.":"All items already in this walk."}</div>}
             {unassigned.map(item=>(
               <div key={item.id} style={{padding:"9px 14px",borderBottom:`1px solid ${C.border}15`,display:"flex",alignItems:"center",gap:10}}>
                 <div style={{flex:1,minWidth:0}}><div style={{fontWeight:600,fontSize:13}}>{item.name||"Unnamed"}</div><div style={{fontFamily:mono,fontSize:10,color:C.muted}}>{item.category}</div></div>
@@ -773,10 +971,11 @@ function WalkTab({items,walks,setWalks,show,canFinance}) {
         )}
       </div>
     )}
-    {walkItems.length>0&&!picking&&(
+
+    {rawItems.length>0&&!picking&&(
       <div style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:8,padding:"12px 14px",display:"flex",justifyContent:"space-between"}}>
-        <div><div style={{fontFamily:mono,fontSize:9,color:C.muted,letterSpacing:2,marginBottom:4}}>WALK VALUE</div><div style={{fontFamily:mono,fontSize:18,fontWeight:700,color:C.amber}}>{fmt$(walkItems.reduce((s,i)=>s+i.qty*i.unitCost,0))}</div></div>
-        <div style={{textAlign:"right"}}><div style={{fontFamily:mono,fontSize:9,color:C.muted,letterSpacing:2,marginBottom:4}}>ITEMS</div><div style={{fontFamily:mono,fontSize:18,fontWeight:700}}>{walkItems.length}</div></div>
+        <div><div style={{fontFamily:mono,fontSize:9,color:C.muted,letterSpacing:2,marginBottom:4}}>WALK VALUE</div><div style={{fontFamily:mono,fontSize:18,fontWeight:700,color:C.amber}}>{fmt$(rawItems.reduce((s,i)=>s+i.qty*i.unitCost,0))}</div></div>
+        <div style={{textAlign:"right"}}><div style={{fontFamily:mono,fontSize:9,color:C.muted,letterSpacing:2,marginBottom:4}}>ITEMS</div><div style={{fontFamily:mono,fontSize:18,fontWeight:700}}>{rawItems.length}</div></div>
       </div>
     )}
   </>);
@@ -800,11 +999,10 @@ function ScanTab({items,setItems,walks,setWalks,scans,setScans,show}) {
     setLoad(true); setErr(""); setResult(null); setPend([]); setDW([]); setProgress({stage:"Reading file…",pct:15,sub:file.name});
     try {
       const d64 = await b64(file); setProgress({stage:"Sending to AI…",pct:35,sub:"Analyzing count sheet"});
-      const isImg = file.type.startsWith("image/");
       const existing = items.map(i=>i.name).join(", ");
       setProgress({stage:"AI reading sheet…",pct:55,sub:"Extracting items & locations"});
       const parsed = await aiCall([{role:"user",content:[
-        {type:isImg?"image":"document",source:{type:"base64",media_type:file.type,data:d64}},
+        aiContent(file,d64),
         {type:"text",text:`Read this restaurant inventory count sheet. Extract every line item AND any storage location sections.\n\nExisting items: ${existing||"none"}\n\nReturn ONLY valid JSON:\n{"locations":[{"name":"string","items":["item name"]}],"items":[{"name":"string","qty":0,"unit":"lb","matchExisting":false,"existingName":"","guessedCategory":"Food - Protein","location":""}],"hasLocations":true,"notes":"string"}\n\nRules: unit=ea/lb/oz/cs/bt/gal/qt/bag/box/can. guessedCategory must be one of: Food - Protein, Food - Produce, Food - Dairy, Food - Dry, Food - Frozen, Food - Misc, Beverage - NA, Liquor, Beer, Wine, Supplies, Other. Extract ALL items, qty=0 if blank. matchExisting=true if close name match.`},
       ]}]);
       setProgress({stage:"Matching existing items…",pct:85,sub:"Building review list"});
@@ -984,12 +1182,12 @@ function LiquorTab({liquor,setLiquor,show,bevSales,setBevSales,lqTotals,settings
   const processFile=async file=>{
     setLoad(true);setErr("");setPend([]);setProgress({stage:"Reading file…",pct:15,sub:file.name});
     try{
-      const d64=await b64(file); const isImg=file.type.startsWith("image/"); setProgress({stage:"Sending to AI…",pct:40,sub:"Analyzing bar sheet"});
+      const d64=await b64(file); setProgress({stage:"Sending to AI…",pct:40,sub:"Analyzing bar sheet"});
       const isCSV=file.name.endsWith(".csv")||file.type==="text/csv";
       const known=liquor.map(l=>l.name).join(", ");
       let msgs;
-      if(isCSV){const text=await file.text();msgs=[{role:"user",content:[{type:"text",text:`Parse liquor inventory CSV.\nKnown items: ${known||"none"}\nCSV:\n${text.slice(0,6000)}\nReturn ONLY JSON:\n{"items":[{"name":"","category":"Spirits","subType":"Whiskey","bottleSize":"750mL","qty":0,"unitCost":0,"matchExisting":false,"existingName":""}],"notes":""}\ncategory: Spirits/Beer/Wine/NA Bev`}]}];}
-      else{msgs=[{role:"user",content:[{type:isImg?"image":"document",source:{type:"base64",media_type:file.type,data:d64}},{type:"text",text:`Parse this liquor inventory for a restaurant bar.\nKnown items: ${known||"none"}\nReturn ONLY valid JSON:\n{"items":[{"name":"","category":"Spirits","subType":"Whiskey","bottleSize":"750mL","qty":0,"unitCost":0,"matchExisting":false,"existingName":""}],"notes":""}\ncategory: Spirits/Beer/Wine/NA Bev. qty uses tenths for spirits (2.7=2 full+7/10).`}]}];}
+      if(isCSV){const text=await file.text();msgs=[{role:"user",content:[{type:"text",text:`Parse liquor inventory CSV.\nKnown items: ${known||"none"}\nCSV:\n${text.slice(0,120000)}\nReturn ONLY JSON:\n{"items":[{"name":"","category":"Spirits","subType":"Whiskey","bottleSize":"750mL","qty":0,"unitCost":0,"matchExisting":false,"existingName":""}],"notes":""}\ncategory: Spirits/Beer/Wine/NA Bev`}]}];}
+      else{msgs=[{role:"user",content:[aiContent(file,d64),{type:"text",text:`Parse this liquor inventory for a restaurant bar.\nKnown items: ${known||"none"}\nReturn ONLY valid JSON:\n{"items":[{"name":"","category":"Spirits","subType":"Whiskey","bottleSize":"750mL","qty":0,"unitCost":0,"matchExisting":false,"existingName":""}],"notes":""}\ncategory: Spirits/Beer/Wine/NA Bev. qty uses tenths for spirits (2.7=2 full+7/10).`}]}];}
       setProgress({stage:"AI reading bar sheet…",pct:65,sub:"Identifying products"});
       const parsed=await aiCall(msgs);
       setProgress({stage:"Matching inventory…",pct:90,sub:"Building review list"});
@@ -1206,27 +1404,89 @@ function GmailImport({setPurch,show}) {
   const [progress,setProg]   = useState(null);
   const [pending,setPend]    = useState([]);
   const [error,setErr]       = useState("");
+  const [nextPage,setNextPg] = useState(null);
+  const [pageStats,setPgSt]  = useState(null);
 
-  const clientId = LS.get("bh_gclientid_v6","");
+  const clientId       = LS.get("bh_gclientid_v6","");
+  const androidId      = LS.get("bh_gclientid_android","");
+  const androidSecret  = LS.get("bh_gclientsecret_android","");
 
-  const loadGIS = cb => {
-    if (window.google?.accounts?.oauth2) { cb(); return; }
-    const s = document.createElement("script");
-    s.src = "https://accounts.google.com/gsi/client";
-    s.onload = cb;
-    s.onerror = () => setErr("Failed to load Google sign-in script");
-    document.head.appendChild(s);
+  // Google requires the reverse client-ID scheme for Desktop/native app OAuth
+  const buildAndroidRedirect = id => {
+    const prefix = id.replace(".apps.googleusercontent.com","");
+    return `com.googleusercontent.apps.${prefix}:/oauth2redirect`;
   };
 
-  const connect = () => {
+  // PKCE helpers for Android OAuth flow
+  const pkceVerifier = () => {
+    const a = new Uint8Array(32);
+    crypto.getRandomValues(a);
+    return btoa(String.fromCharCode(...a)).replace(/\+/g,"-").replace(/\//g,"_").replace(/=/g,"");
+  };
+  const pkceChallenge = async v => {
+    const d = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(v));
+    return btoa(String.fromCharCode(...new Uint8Array(d))).replace(/\+/g,"-").replace(/\//g,"_").replace(/=/g,"");
+  };
+
+  const connectAndroid = async () => {
+    const id = androidId || clientId;
+    if (!id) { setErr("No Google Client ID — add it in ⚙ Settings"); return; }
+    setErr("");
+    const redirectUri = buildAndroidRedirect(id);
+    const { Browser } = await import("@capacitor/browser");
+    const { App: CapApp } = await import("@capacitor/app");
+    const verifier = pkceVerifier();
+    const challenge = await pkceChallenge(verifier);
+    const params = new URLSearchParams({
+      client_id: id, redirect_uri: redirectUri,
+      response_type: "code",
+      scope: "https://www.googleapis.com/auth/gmail.readonly",
+      code_challenge: challenge, code_challenge_method: "S256",
+      access_type: "online",
+    });
+    const listener = await CapApp.addListener("appUrlOpen", async ev => {
+      await listener.remove();
+      await Browser.close().catch(()=>{});
+      try {
+        const url = new URL(ev.url);
+        const code = url.searchParams.get("code");
+        const oauthErr = url.searchParams.get("error");
+        if (oauthErr) { setErr(oauthErr); return; }
+        if (!code) { setErr("No authorization code received"); return; }
+        const secret = androidSecret;
+        const tokenParams = { client_id:id, code, code_verifier:verifier,
+          grant_type:"authorization_code", redirect_uri:redirectUri };
+        if (secret) tokenParams.client_secret = secret;
+        const resp = await fetch("https://oauth2.googleapis.com/token", {
+          method:"POST", headers:{"Content-Type":"application/x-www-form-urlencoded"},
+          body: new URLSearchParams(tokenParams),
+        });
+        const td = await resp.json();
+        if (td.error) { setErr(td.error_description||td.error); return; }
+        setToken(td.access_token);
+        fetchEmails(td.access_token);
+      } catch(e) { setErr(e.message||"Authentication failed"); }
+    });
+    await Browser.open({ url:`https://accounts.google.com/o/oauth2/v2/auth?${params}` });
+  };
+
+  const connectWeb = () => {
     if (!clientId) { setErr("No Google Client ID — add it in ⚙ Settings"); return; }
     setErr("");
+    const loadGIS = cb => {
+      if (window.google?.accounts?.oauth2) { cb(); return; }
+      const s = document.createElement("script");
+      s.src = "https://accounts.google.com/gsi/client";
+      s.onload = cb;
+      s.onerror = () => setErr("Failed to load Google sign-in script");
+      document.head.appendChild(s);
+    };
     loadGIS(() => {
       window.google.accounts.oauth2.initTokenClient({
         client_id: clientId,
         scope: "https://www.googleapis.com/auth/gmail.readonly",
         callback: r => {
-          if (r.error) { setErr(r.error_description || r.error); return; }
+          if (r.error) { setErr(r.error_description||r.error); return; }
           setToken(r.access_token);
           fetchEmails(r.access_token);
         },
@@ -1234,69 +1494,128 @@ function GmailImport({setPurch,show}) {
     });
   };
 
+  const connect = () => Capacitor.isNativePlatform() ? connectAndroid() : connectWeb();
+
   const gmailFetch = (url, tok) =>
     fetch(url, {headers:{Authorization:`Bearer ${tok}`}}).then(r=>r.json());
 
   const extractBody = msg => {
+    const stripHtml = html => html
+      .replace(/<style[^>]*>[\s\S]*?<\/style>/gi," ")
+      .replace(/<script[^>]*>[\s\S]*?<\/script>/gi," ")
+      .replace(/<[^>]+>/g," ").replace(/\s+/g," ").trim();
+    const decode = b64 => atob(b64.replace(/-/g,"+").replace(/_/g,"/"));
     const walk = parts => {
       for (const p of parts||[]) {
-        if (p.mimeType==="text/plain" && p.body?.data)
-          return atob(p.body.data.replace(/-/g,"+").replace(/_/g,"/"));
+        if (p.mimeType==="text/plain" && p.body?.data) return decode(p.body.data);
         if (p.parts) { const r=walk(p.parts); if(r) return r; }
       }
       for (const p of parts||[]) {
-        if (p.mimeType==="text/html" && p.body?.data)
-          return atob(p.body.data.replace(/-/g,"+").replace(/_/g,"/")).replace(/<[^>]+>/g," ").replace(/\s+/g," ").trim();
+        if (p.mimeType==="text/html" && p.body?.data) return stripHtml(decode(p.body.data));
+        if (p.parts) { const r=walkHtml(p.parts); if(r) return r; }
+      }
+      return "";
+    };
+    const walkHtml = parts => {
+      for (const p of parts||[]) {
+        if (p.mimeType==="text/html" && p.body?.data) return stripHtml(decode(p.body.data));
+        if (p.parts) { const r=walkHtml(p.parts); if(r) return r; }
       }
       return "";
     };
     if (msg.payload?.parts) return walk(msg.payload.parts);
-    if (msg.payload?.body?.data) return atob(msg.payload.body.data.replace(/-/g,"+").replace(/_/g,"/"));
+    if (msg.payload?.body?.data) {
+      const raw = decode(msg.payload.body.data);
+      return raw.startsWith("<") ? stripHtml(raw) : raw;
+    }
     return msg.snippet||"";
   };
 
   const hdr = (msg,name) => msg.payload?.headers?.find(h=>h.name===name)?.value||"";
 
-  const fetchEmails = async tok => {
-    setLoad(true); setErr(""); setPend([]); setProg({stage:"Searching Gmail…",pct:10});
-    try {
-      const since = new Date(); since.setDate(since.getDate()-90);
-      const after = Math.floor(since.getTime()/1000);
-      const q = encodeURIComponent(
-        `(from:sysco OR from:usfoods OR from:"us foods" OR from:"gordon food" OR from:"restaurant depot" OR from:"performance food" OR from:shamrock OR from:"lone star" OR subject:invoice OR subject:receipt OR subject:"order confirmation" OR subject:"payment confirmation") after:${after}`
-      );
-      setProg({stage:"Searching Gmail…",pct:15});
-      const list = await gmailFetch(`https://www.googleapis.com/gmail/v1/users/me/messages?q=${q}&maxResults=40`,tok);
-      const msgs = list.messages||[];
-      if (!msgs.length) { setErr("No vendor emails found in the last 3 months."); setProg(null); setLoad(false); return; }
+  const VENDOR_GUIDE = `Vendor → category guide:
+- Fortune Fish & Gourmet / fortune fish → Food - Protein (seafood/fish)
+- Loffredo → Food - Produce or Food - Dry (Midwest grocery distributor)
+- Sysco / US Foods / Gordon Food / Reinhart / Performance Food / PFG → split by line items when possible; default Food - Misc
+- Chef's Warehouse / Chefs Warehouse → Food - Protein or Food - Dairy (specialty)
+- Restaurant Depot → split by line items if possible
+- Shamrock Foods / US Dairy → Food - Dairy
+- Cintas / Ecolab / Sysco Chemical / SESCO → Supplies
+- RNDC / Southern Glazer / Breakthru / Republic → Liquor, Beer, or Wine (check line items)
+- Any beer-only distributor → Beer
+- Any wine-only merchant → Wine`;
 
-      setProg({stage:`Found ${msgs.length} emails — reading…`,pct:25});
+  const GMAIL_Q = after => `(from:sysco OR from:usfoods OR from:"us foods" OR from:"gordon food" OR from:"restaurant depot" OR from:"performance food" OR from:shamrock OR from:"lone star" OR from:"fortune fish" OR from:loffredo OR from:reinhart OR from:"chef's warehouse" OR from:"chefs warehouse" OR from:pfg OR from:rndc OR from:"southern glazer" OR from:breakthru OR from:cintas OR from:ecolab OR subject:invoice OR subject:receipt OR subject:"order confirmation" OR subject:"delivery confirmation" OR subject:statement) after:${after}`;
+
+  const fetchEmails = async (tok, pageToken=null) => {
+    const isFirstPage = !pageToken;
+    setLoad(true); setErr(""); setProg({stage:isFirstPage?"Searching Gmail…":"Loading next page…",pct:10});
+    if (isFirstPage) { setPend([]); setNextPg(null); setPgSt(null); }
+    try {
+      let listUrl;
+      if (isFirstPage) {
+        const since = new Date(); since.setDate(since.getDate()-90);
+        const after = Math.floor(since.getTime()/1000);
+        listUrl = `https://www.googleapis.com/gmail/v1/users/me/messages?q=${encodeURIComponent(GMAIL_Q(after))}&maxResults=50`;
+      } else {
+        listUrl = `https://www.googleapis.com/gmail/v1/users/me/messages?pageToken=${pageToken}&maxResults=50`;
+      }
+
+      setProg({stage:"Searching Gmail…",pct:15});
+      const list = await gmailFetch(listUrl, tok);
+      const msgs = list.messages||[];
+      setNextPg(list.nextPageToken||null);
+
+      if (!msgs.length) {
+        if (isFirstPage) { setErr("No vendor emails found in the last 3 months."); setProg(null); setLoad(false); return; }
+        setProg({stage:"Done — no more emails",pct:100}); setTimeout(()=>setProg(null),800); setLoad(false); return;
+      }
+
+      setPgSt(prev=>({
+        pagesLoaded:(prev?.pagesLoaded||0)+1,
+        emailsRead:(prev?.emailsRead||0)+msgs.length,
+        hasMore:!!list.nextPageToken,
+      }));
+      setProg({stage:`Found ${msgs.length} emails — reading…`,pct:20});
+
       const bodies = [];
-      const limit = Math.min(msgs.length, 25);
-      for (let i=0; i<limit; i++) {
+      for (let i=0; i<msgs.length; i++) {
         const msg = await gmailFetch(`https://www.googleapis.com/gmail/v1/users/me/messages/${msgs[i].id}?format=full`,tok);
         bodies.push({
           subject: hdr(msg,"Subject"),
           from:    hdr(msg,"From"),
           date:    hdr(msg,"Date"),
-          body:    extractBody(msg).slice(0,3000),
+          body:    extractBody(msg).slice(0,8000),
         });
-        setProg({stage:`Reading emails… (${i+1}/${limit})`,pct:25+Math.round((i/limit)*40)});
+        setProg({stage:`Reading emails… (${i+1}/${msgs.length})`,pct:20+Math.round((i/msgs.length)*45)});
       }
 
       setProg({stage:"Sending to AI…",pct:66});
       const results = [];
-      const BATCH = 5;
+      const BATCH = 4;
       for (let i=0; i<bodies.length; i+=BATCH) {
         const chunk = bodies.slice(i,i+BATCH);
         const txt = chunk.map((e,n)=>`--- Email ${n+1} ---\nFrom: ${e.from}\nDate: ${e.date}\nSubject: ${e.subject}\n${e.body}`).join("\n\n");
-        const parsed = await aiCall([{role:"user",content:`Extract purchase data from these vendor emails for Beacon Hills restaurant.\nOnly include emails that are actual invoices or payment confirmations with a dollar amount.\nReturn ONLY valid JSON:\n{"purchases":[{"vendor":"","date":"YYYY-MM-DD","amount":0,"category":"Food - Misc","invoice":"","notes":"","confidence":"high|medium|low"}]}\nCategories: ${CATS.join(", ")}\nSkip newsletters, promotions, tracking updates with no total amount.\n\n${txt}`}]);
+        const parsed = await aiCall([{role:"user",content:`Extract all vendor purchase data from these emails for Beacon Hills restaurant (New Standard Hospitality).
+
+${VENDOR_GUIDE}
+
+SPLITTING RULE: If one invoice/statement covers multiple cost categories (e.g. a Sysco order with proteins + produce + dry goods), create a SEPARATE entry per category with the appropriate sub-total. Use notes to indicate it was split (e.g. "split from $2,400 invoice").
+
+Return ONLY valid JSON:
+{"purchases":[{"vendor":"","date":"YYYY-MM-DD","amount":0,"category":"Food - Misc","invoice":"","notes":"","confidence":"high|medium|low"}]}
+Categories: ${CATS.join(", ")}
+
+Skip newsletters, promotions, shipping tracking with no dollar total, and non-food/beverage/supply purchases.
+
+${txt}`}],6000);
         if (parsed.purchases?.length) results.push(...parsed.purchases);
-        setProg({stage:"Processing with AI…",pct:66+Math.round(((i+BATCH)/bodies.length)*30)});
+        setProg({stage:`AI processing ${i+1}–${Math.min(i+BATCH,bodies.length)} of ${bodies.length}…`,pct:66+Math.round(((i+BATCH)/bodies.length)*30)});
       }
 
       setProg({stage:"Done",pct:100});
-      setPend(results.filter(r=>r.amount>0).map(r=>({...r,selected:true})));
+      const fresh = results.filter(r=>r.amount>0).map(r=>({...r,selected:true}));
+      setPend(prev=>isFirstPage ? fresh : [...prev, ...fresh]);
       setTimeout(()=>setProg(null),800);
     } catch(e) { setErr(e.message||"Failed"); setProg(null); }
     finally { setLoad(false); }
@@ -1326,10 +1645,17 @@ function GmailImport({setPurch,show}) {
       <span style={{fontFamily:mono,fontSize:10,color:C.muted}}>Last 3 months</span>
     </div>
     <div style={{padding:14}}>
-      <div style={{fontFamily:mono,fontSize:10,color:C.muted,lineHeight:1.7,marginBottom:12}}>Scans Gmail for vendor invoices &amp; payment confirmations and uses AI to extract and categorize each purchase.</div>
+      <div style={{fontFamily:mono,fontSize:10,color:C.muted,lineHeight:1.7,marginBottom:12}}>Scans Gmail for vendor invoices &amp; payment confirmations and uses AI to extract and categorize each purchase. Loads 50 emails at a time — use "Load more" to keep going.</div>
       {!token
         ? <button style={{...S.btn("blue"),width:"100%",justifyContent:"center",padding:"13px"}} onClick={connect} disabled={loading}>🔐 Connect Gmail</button>
         : <button style={{...S.btn("blue"),width:"100%",justifyContent:"center",padding:"13px"}} onClick={()=>fetchEmails(token)} disabled={loading}>🔄 Re-scan Gmail</button>}
+      {pageStats&&!loading&&(
+        <div style={{fontFamily:mono,fontSize:10,color:C.muted,marginTop:10,lineHeight:1.8}}>
+          Page {pageStats.pagesLoaded} · {pageStats.emailsRead} emails read · {pending.length} purchases found
+          {pageStats.hasMore&&<span style={{color:C.blue}}> · more available ↓</span>}
+          {!pageStats.hasMore&&<span style={{color:C.green}}> · all caught up</span>}
+        </div>
+      )}
       {loading&&<UploadProgress progress={progress} color={C.blue}/>}
       {error&&<div style={{background:`${C.red}15`,border:`1px solid ${C.red}40`,borderRadius:6,padding:11,marginTop:12,color:C.red,fontFamily:mono,fontSize:11}}>⚠ {error}</div>}
     </div></div>
@@ -1367,7 +1693,12 @@ function GmailImport({setPurch,show}) {
             </div>
           </div>
         ))}
-        <div style={{padding:14}}>
+        <div style={{padding:14,display:"grid",gap:8}}>
+          {nextPage&&(
+            <button style={{...S.btn("blue"),width:"100%",justifyContent:"center",padding:"12px"}} onClick={()=>fetchEmails(token,nextPage)} disabled={loading}>
+              {loading?"Loading…":"Load next 50 emails →"}
+            </button>
+          )}
           <button style={{...S.btn(),width:"100%",justifyContent:"center",padding:"13px"}} onClick={apply}>
             Import {pending.filter(r=>r.selected).length} purchase{pending.filter(r=>r.selected).length!==1?"s":""} →
           </button>
@@ -1389,14 +1720,14 @@ function PurchasesTab({purchases,setPurch,items,setItems,liquor,setLiquor,priceH
     setLoad(true);setErr("");setParsed(null);setProgress({stage:"Reading file…",pct:15,sub:file.name});
     try{
       const isCSV=file.name.endsWith(".csv")||file.type==="text/csv";
-      const isImg=file.type.startsWith("image/");
+
       const names=items.map(i=>i.name).join(", ");
       const schema='{"vendor":"","invoiceNum":"","invoiceDate":"YYYY-MM-DD","lineItems":[{"name":"","qty":0,"unit":"lb","unitCost":0,"lineTotal":0,"matchExisting":false,"existingName":""}],"invoiceTotal":0,"notes":""}';
       const rules="Return ONLY the JSON object. No other text. Item names max 40 chars. unit=lb/oz/cs/ea/gal/bt/kg.";
       let msgs;
       setProgress({stage:"Sending to AI…",pct:40,sub:"Reading invoice"});
-      if(isCSV){const text=await file.text();msgs=[{role:"user",content:[{type:"text",text:`Parse vendor invoice CSV for Beacon Hills.\nKnown items: ${names}\nCSV:\n${text.slice(0,6000)}\nSchema: ${schema}\n${rules}`}]}];}
-      else{setProgress({stage:"Encoding file…",pct:30,sub:"Preparing image"});const d64=await b64(file);setProgress({stage:"Sending to AI…",pct:50,sub:"Reading invoice"});msgs=[{role:"user",content:[{type:isImg?"image":"document",source:{type:"base64",media_type:file.type,data:d64}},{type:"text",text:`Parse vendor invoice for Beacon Hills.\nKnown items: ${names}\nSchema: ${schema}\n${rules}`}]}];}
+      if(isCSV){const text=await file.text();msgs=[{role:"user",content:[{type:"text",text:`Parse vendor invoice CSV for Beacon Hills.\nKnown items: ${names}\nCSV:\n${text.slice(0,120000)}\nSchema: ${schema}\n${rules}`}]}];}
+      else{setProgress({stage:"Encoding file…",pct:30,sub:"Preparing image"});const d64=await b64(file);setProgress({stage:"Sending to AI…",pct:50,sub:"Reading invoice"});msgs=[{role:"user",content:[aiContent(file,d64),{type:"text",text:`Parse vendor invoice for Beacon Hills.\nKnown items: ${names}\nSchema: ${schema}\n${rules}`}]}];}
       setProgress({stage:"AI parsing invoice…",pct:70,sub:"Extracting line items"});
       const p=await aiCall(msgs);
       setProgress({stage:"Done",pct:100,sub:`${(p.lineItems||[]).length} items · ${p.vendor||""}`});
@@ -1410,10 +1741,10 @@ function PurchasesTab({purchases,setPurch,items,setItems,liquor,setLiquor,priceH
     if(!parsed)return;
     setPurch(p=>[{id:uid(),date:parsed.invoiceDate||today(),vendor:parsed.vendor||"Unknown",invoice:parsed.invoiceNum||"",amount:parsed.invoiceTotal||0,category:"Food - Misc",notes:`Parsed from ${parsed.sourceFile}`},...p]);
     const upd=[...items];
-    (parsed.lineItems||[]).forEach(li=>{if(li.unitCost>0){const k=li.matchExisting&&li.existingName?li.existingName:li.name;const i=upd.findIndex(x=>x.name===k||x.name.toLowerCase().includes(li.name.toLowerCase()));if(i>=0)upd[i]={...upd[i],unitCost:li.unitCost};}});
+    (parsed.lineItems||[]).forEach(li=>{const lname=(li.name||"").trim();if(!(li.unitCost>0)||!lname)return;const k=li.matchExisting&&li.existingName?li.existingName:lname;const i=upd.findIndex(x=>x.name===k||(x.name&&x.name.toLowerCase().includes(lname.toLowerCase())));if(i>=0)upd[i]={...upd[i],unitCost:li.unitCost};});
     setItems(upd);
     // Also update bar item costs
-    if(liquor&&setLiquor){const lUpd=[...liquor];(parsed.lineItems||[]).forEach(li=>{if(li.unitCost>0){const i=lUpd.findIndex(x=>x.name.toLowerCase().includes(li.name.toLowerCase()));if(i>=0)lUpd[i]={...lUpd[i],unitCost:li.unitCost};}});setLiquor(lUpd);}
+    if(liquor&&setLiquor){const lUpd=[...liquor];(parsed.lineItems||[]).forEach(li=>{const lname=(li.name||"").trim();if(!(li.unitCost>0)||!lname)return;const i=lUpd.findIndex(x=>x.name&&x.name.toLowerCase().includes(lname.toLowerCase()));if(i>=0)lUpd[i]={...lUpd[i],unitCost:li.unitCost};});setLiquor(lUpd);}
     setPH(p=>[{id:uid(),file:parsed.sourceFile,ts:new Date().toLocaleString(),prices:(parsed.lineItems||[]).map(li=>({name:li.name,unitCost:li.unitCost,unit:li.unit})),reportDate:parsed.invoiceDate,notes:parsed.notes},...p]);
     show(`Invoice from ${parsed.vendor||"vendor"} applied`);setParsed(null);setMode("list");
   };
@@ -1502,11 +1833,51 @@ function PricesTab({items,setItems,liquor,setLiquor,priceHist,setPH,show,walks,s
     return{isSmart,rows};
   };
 
+  const SYSCO_CAT_MAP={
+    "Canned & Dry":"Food - Dry","Chemical & Janitorial":"Supplies",
+    "Dairy":"Food - Dairy","Frozen":"Food - Frozen",
+    "Meats":"Food - Protein","Poultry":"Food - Protein","Seafood":"Food - Protein",
+    "Produce":"Food - Produce","Supplies & Equipment":"Supplies",
+  };
+
+  const parseSyscoCSV=(text,existingItems=[])=>{
+    const lines=text.split("\n");
+    let headerIdx=-1,headers=[];
+    for(let i=0;i<Math.min(lines.length,5);i++){
+      const h=lines[i].split(",").map(c=>c.replace(/"/g,"").trim());
+      if(h.includes("SUPC")&&h.includes("Description")){headerIdx=i;headers=h;break;}
+    }
+    if(headerIdx===-1)return null;
+    const descIdx=headers.indexOf("Description");
+    const priceIdx=headers.indexOf("Price");
+    const unitIdx=headers.findIndex(h=>h.startsWith("CS/LB"));
+    const catIdx=headers.indexOf("Category");
+    if(descIdx===-1||priceIdx===-1)return null;
+    const rows=[];
+    for(let i=headerIdx+1;i<lines.length;i++){
+      if(!lines[i].trim())continue;
+      const vals=[];let cur="",inQ=false;
+      for(const ch of lines[i]){if(ch==='"'){inQ=!inQ;}else if(ch===','&&!inQ){vals.push(cur);cur="";}else cur+=ch;}
+      vals.push(cur);
+      const desc=(vals[descIdx]||"").trim();if(!desc)continue;
+      const unitCost=parseFloat((vals[priceIdx]||"").trim())||0;
+      const rawUnit=unitIdx>=0?(vals[unitIdx]||"").trim().toUpperCase().replace(/\s+/g,""):"CS";
+      const unit=rawUnit==="LB"?"lb":rawUnit==="EA"?"ea":"cs";
+      const syscoCat=catIdx>=0?(vals[catIdx]||"").trim():"";
+      const category=SYSCO_CAT_MAP[syscoCat]||"Food - Dry";
+      const entry={name:desc,unitCost,unit,category,matchExisting:false,existingName:""};
+      const m=existingItems.find(x=>x.name.toLowerCase()===desc.toLowerCase());
+      if(m){entry.matchExisting=true;entry.existingName=m.name;}
+      rows.push(entry);
+    }
+    return rows.length>0?rows:null;
+  };
+
   const process=async file=>{
     setLoad(true);setErr("");setPend([]);setRev([]);setApplied(false);setProgress({stage:"Reading file…",pct:15,sub:file.name});
     try{
       const isCSV=file.name.endsWith(".csv")||file.type==="text/csv";
-      const isImg=file.type.startsWith("image/");
+
       if(isCSV){
         const text=await file.text();
         const{isSmart,rows}=parseSmartCSV(text);
@@ -1525,12 +1896,21 @@ function PricesTab({items,setItems,liquor,setLiquor,priceHist,setPH,show,walks,s
           setTimeout(()=>setProgress(null),900);
           setLoad(false);return;
         }
+        const sysco=parseSyscoCSV(text,items);
+        if(sysco){
+          setProgress({stage:"Matching items…",pct:80,sub:`${sysco.length} items found`});
+          setPend(sysco);
+          setPH(prev=>[{id:uid(),file:file.name,ts:new Date().toLocaleString(),prices:sysco,notes:`Sysco import: ${sysco.length} items`},...prev.slice(0,19)]);
+          setProgress({stage:"Done",pct:100,sub:`${sysco.length} items imported`});
+          setTimeout(()=>setProgress(null),900);
+          setLoad(false);return;
+        }
       }
       const names=items.map(i=>i.name).join(", ");
       let msgs;
       setProgress({stage:"Sending to AI…",pct:40,sub:"Reading cost report"});
-      if(isCSV){const text=await file.text();msgs=[{role:"user",content:[{type:"text",text:`Parse average cost report CSV.\nKnown items: ${names}\nCSV:\n${text.slice(0,6000)}\nReturn ONLY JSON:\n{"prices":[{"name":"","unitCost":0,"unit":"lb","matchExisting":false,"existingName":""}],"reportDate":"YYYY-MM-DD","notes":""}`}]}];}
-      else{setProgress({stage:"Encoding file…",pct:30,sub:"Preparing image"});const d64=await b64(file);setProgress({stage:"Sending to AI…",pct:50,sub:"Reading cost report"});msgs=[{role:"user",content:[{type:isImg?"image":"document",source:{type:"base64",media_type:file.type,data:d64}},{type:"text",text:`Parse price/cost report.\nKnown items: ${names}\nReturn ONLY JSON:\n{"prices":[{"name":"","unitCost":0,"unit":"lb","matchExisting":false,"existingName":""}],"reportDate":"YYYY-MM-DD","notes":""}`}]}];}
+      if(isCSV){const text=await file.text();msgs=[{role:"user",content:[{type:"text",text:`Parse average cost report CSV.\nKnown items: ${names}\nCSV:\n${text.slice(0,120000)}\nReturn ONLY JSON:\n{"prices":[{"name":"","unitCost":0,"unit":"lb","matchExisting":false,"existingName":""}],"reportDate":"YYYY-MM-DD","notes":""}`}]}];}
+      else{setProgress({stage:"Encoding file…",pct:30,sub:"Preparing image"});const d64=await b64(file);setProgress({stage:"Sending to AI…",pct:50,sub:"Reading cost report"});msgs=[{role:"user",content:[aiContent(file,d64),{type:"text",text:`Parse price/cost report.\nKnown items: ${names}\nReturn ONLY JSON:\n{"prices":[{"name":"","unitCost":0,"unit":"lb","matchExisting":false,"existingName":""}],"reportDate":"YYYY-MM-DD","notes":""}`}]}];}
       setProgress({stage:"AI reading report…",pct:65,sub:"Extracting prices"});
       const p=await aiCall(msgs);
       setProgress({stage:"Matching items…",pct:90,sub:`${(p.prices||[]).length} prices found`});
@@ -1546,13 +1926,14 @@ function PricesTab({items,setItems,liquor,setLiquor,priceHist,setPH,show,walks,s
     const all=[...pending,...review.filter(r=>!r.skip)];
     const upd=[...items];
     all.forEach(pp=>{
-      const key=pp.matchExisting&&pp.existingName?pp.existingName:pp.name;
-      const idx=upd.findIndex(i=>i.name===key||i.name.toLowerCase()===pp.name.toLowerCase());
+      const pname=(pp.name||"").trim();if(!pname)return;
+      const key=pp.matchExisting&&pp.existingName?pp.existingName:pname;
+      const idx=upd.findIndex(i=>i.name===key||(i.name&&i.name.toLowerCase()===pname.toLowerCase()));
       if(idx>=0){upd[idx]={...upd[idx],unitCost:pp.reviewCost||pp.unitCost,unit:pp.reviewUnit||pp.unit};}
-      else{upd.push({id:uid(),name:pp.name,unit:pp.reviewUnit||pp.unit,qty:pp.qty||0,unitCost:pp.reviewCost||pp.unitCost,category:pp.category||"Other",par:0});}
+      else{upd.push({id:uid(),name:pname,unit:pp.reviewUnit||pp.unit,qty:pp.qty||0,unitCost:pp.reviewCost||pp.unitCost,category:pp.category||"Other",par:0});}
     });
     setItems(upd);
-    if(liquor&&setLiquor){const lUpd=[...liquor];all.forEach(pp=>{const i=lUpd.findIndex(l=>l.name.toLowerCase()===pp.name.toLowerCase());if(i>=0)lUpd[i]={...lUpd[i],unitCost:pp.reviewCost||pp.unitCost};});setLiquor(lUpd);}
+    if(liquor&&setLiquor){const lUpd=[...liquor];all.forEach(pp=>{const pname=(pp.name||"").trim();if(!pname)return;const i=lUpd.findIndex(l=>l.name&&l.name.toLowerCase()===pname.toLowerCase());if(i>=0)lUpd[i]={...lUpd[i],unitCost:pp.reviewCost||pp.unitCost};});setLiquor(lUpd);}
     if(walks&&setWalks)setWalks(autoAssign(upd,walks));
     setPend([]);setRev([]);setApplied(true);
     show(`${all.length} items imported · walks updated`);
@@ -1736,12 +2117,12 @@ function RecipeTab({recipes,setRecipes,items,liquor,settings,show,canFinance}) {
 // ─── REPORTS TAB ─────────────────────────────────────────────────────────────
 function ReportsTab({items,purchases,liquor,lqTotals,totalFood,totalPurch,totalBev,totalBevSales,bevSales,fcPct,bevPct,sales,walks,foodLow,liqLow,waste,settings,show,wasteCost,snaps,recipes}) {
   const expFood=()=>{
-    const ws=walks.flatMap(w=>{const wi=w.itemIds.map(id=>items.find(i=>i.id===id)).filter(Boolean);if(!wi.length)return[];return[[`--- ${w.name} ---`,"","","","",""],...wi.map(i=>[i.name,i.category,i.qty,i.unit,i.unitCost.toFixed(4),(i.qty*i.unitCost).toFixed(2)])]});
-    dlCSV([["BEACON HILLS — FOOD INVENTORY REPORT","","","","",""],["Generated:",new Date().toLocaleString(),"","","",""],["","","","","",""],["=== INVENTORY (WALK ORDER) ===","","","","",""],["Item","Category","Qty","Unit","Unit Cost","Value"],...ws,["","","","","TOTAL",totalFood.toFixed(2)],["","","","","",""],["=== PURCHASES ===","","","","",""],["Date","Vendor","Invoice","Category","Amount","Notes"],...purchases.map(p=>[p.date,p.vendor,p.invoice||"",p.category||"",p.amount.toFixed(2),p.notes||""]),["","","","","TOTAL",totalPurch.toFixed(2)],["","","","","",""],["=== FOOD COST ===","","","","",""],["Total Purchases","","","","",totalPurch.toFixed(2)],["Period Sales","","","","",sales.toFixed(2)],["Food Cost %","","","","",fcPct!==null?fmtPct(fcPct):"—"]],`BH_FoodReport_${today()}.csv`);show("Food report exported");
+    const ws=walks.flatMap(w=>{const wi=w.itemIds.map(id=>items.find(i=>i.id===id)).filter(Boolean);if(!wi.length)return[];return[[`--- ${w.name} ---`,"","","","",""],...wi.map(i=>[i.name,i.category,i.qty,i.unit,(i.unitCost||0).toFixed(4),((i.qty||0)*(i.unitCost||0)).toFixed(2)])]});
+    dlCSV([["BEACON HILLS — FOOD INVENTORY REPORT","","","","",""],["Generated:",new Date().toLocaleString(),"","","",""],["","","","","",""],["=== INVENTORY (WALK ORDER) ===","","","","",""],["Item","Category","Qty","Unit","Unit Cost","Value"],...ws,["","","","","TOTAL",totalFood.toFixed(2)],["","","","","",""],["=== PURCHASES ===","","","","",""],["Date","Vendor","Invoice","Category","Amount","Notes"],...purchases.map(p=>[p.date,p.vendor,p.invoice||"",p.category||"",(p.amount||0).toFixed(2),p.notes||""]),["","","","","TOTAL",totalPurch.toFixed(2)],["","","","","",""],["=== FOOD COST ===","","","","",""],["Total Purchases","","","","",totalPurch.toFixed(2)],["Period Sales","","","","",sales.toFixed(2)],["Food Cost %","","","","",fcPct!==null?fmtPct(fcPct):"—"]],`BH_FoodReport_${today()}.csv`);show("Food report exported");
   };
   const expBev=()=>{
     const cats=[{k:"spirits",l:"Spirits",t:[18,22]},{k:"beer",l:"Beer",t:[22,28]},{k:"wine",l:"Wine",t:[25,30]},{k:"na",l:"NA Bev",t:[20,30]}];
-    dlCSV([["BEACON HILLS — BEVERAGE COST REPORT","","",""],["Generated:",new Date().toLocaleString(),"",""],["","","",""],["=== LIQUOR INVENTORY ===","","","","",""],["Item","Category","Qty","Bottle Size","Cost","Value"],...liquor.map(l=>[l.name,l.category,l.qty,l.bottleSize,l.unitCost.toFixed(2),(l.qty*l.unitCost).toFixed(2)]),["","","","","TOTAL",totalBev.toFixed(2)],["","","","","",""],["=== BEV COST ===","","","","",""],["Category","Inv Value","Sales","Cost%","Target","Status"],...cats.map(c=>{const s=parseFloat(bevSales[c.k])||0;const p=s>0?(lqTotals[c.k]/s)*100:0;return[c.l,lqTotals[c.k].toFixed(2),s.toFixed(2),p>0?fmtPct(p):"—",`${c.t[0]}–${c.t[1]}%`,p>0&&p>c.t[1]?"OVER":p>0&&p<c.t[0]?"UNDER":p>0?"OK":"—"];}),["OVERALL",totalBev.toFixed(2),totalBevSales.toFixed(2),bevPct!==null?fmtPct(bevPct):"—","18–28%",""]],`BH_BevReport_${today()}.csv`);show("Bev report exported");
+    dlCSV([["BEACON HILLS — BEVERAGE COST REPORT","","",""],["Generated:",new Date().toLocaleString(),"",""],["","","",""],["=== LIQUOR INVENTORY ===","","","","",""],["Item","Category","Qty","Bottle Size","Cost","Value"],...liquor.map(l=>[l.name,l.category,l.qty,l.bottleSize,(l.unitCost||0).toFixed(2),((l.qty||0)*(l.unitCost||0)).toFixed(2)]),["","","","","TOTAL",totalBev.toFixed(2)],["","","","","",""],["=== BEV COST ===","","","","",""],["Category","Inv Value","Sales","Cost%","Target","Status"],...cats.map(c=>{const s=parseFloat(bevSales[c.k])||0;const p=s>0?((lqTotals[c.k]||0)/s)*100:0;return[c.l,(lqTotals[c.k]||0).toFixed(2),s.toFixed(2),p>0?fmtPct(p):"—",`${c.t[0]}–${c.t[1]}%`,p>0&&p>c.t[1]?"OVER":p>0&&p<c.t[0]?"UNDER":p>0?"OK":"—"];}),["OVERALL",totalBev.toFixed(2),totalBevSales.toFixed(2),bevPct!==null?fmtPct(bevPct):"—","18–28%",""]],`BH_BevReport_${today()}.csv`);show("Bev report exported");
   };
   const expOrder=()=>{
     const fr=foodLow.map(i=>[i.name,"Food",i.category,i.qty,i.par,(i.par-i.qty).toFixed(2),i.unit,fmt$((i.par-i.qty)*i.unitCost)]);
@@ -1755,7 +2136,7 @@ function ReportsTab({items,purchases,liquor,lqTotals,totalFood,totalPurch,totalB
     dlCSV([["BEACON HILLS — BLANK COUNT SHEET","","",""],["Date: ___________","Counter: ___________","",""],["","","",""],...ws],`BH_BlankSheet_${today()}.csv`);show("Blank sheet exported");
   };
   const expWaste=()=>{
-    dlCSV([["BEACON HILLS — WASTE REPORT","","","",""],["Generated:",new Date().toLocaleString(),"","",""],["Period Total:",fmt$(wasteCost),"","",""],["","","","",""],["Date","Item","Type","Qty","Cost","Notes"],...waste.map(w=>[w.date,w.itemName,w.type,w.qty,w.cost.toFixed(2),w.notes||""]),["","","","","TOTAL",wasteCost.toFixed(2)]],`BH_WasteReport_${today()}.csv`);show("Waste report exported");
+    dlCSV([["BEACON HILLS — WASTE REPORT","","","",""],["Generated:",new Date().toLocaleString(),"","",""],["Period Total:",fmt$(wasteCost),"","",""],["","","","",""],["Date","Item","Type","Qty","Cost","Notes"],...waste.map(w=>[w.date,w.itemName,w.type,w.qty,(w.cost||0).toFixed(2),w.notes||""]),["","","","","TOTAL",wasteCost.toFixed(2)]],`BH_WasteReport_${today()}.csv`);show("Waste report exported");
   };
   const expRecipes=()=>{
     const rows=recipes.flatMap(r=>{
@@ -1850,7 +2231,7 @@ function HistoryTab({snaps,setSnaps,lockSnap,show,canFinance}) {
 }
 
 // ─── SETTINGS TAB ────────────────────────────────────────────────────────────
-function SettingsTab({settings,setSettings,items,setItems,liquor,setLiquor,purchases,setPurch,waste,setWaste,snaps,setSnaps,scans,setScans,recipes,setRecipes,priceHist,setPH,walks,setWalks,show,role,appUsers,setAppUsers,currentUser,setCurrentUser}) {
+function SettingsTab({settings,setSettings,items,setItems,liquor,setLiquor,purchases,setPurch,waste,setWaste,snaps,setSnaps,scans,setScans,recipes,setRecipes,priceHist,setPH,walks,setWalks,sales,setSales,bevSales,setBevSales,show,role,appUsers,setAppUsers,currentUser,setCurrentUser}) {
   const upd=(k,v)=>setSettings(s=>({...s,[k]:v}));
   const [cc,setCC]=useState(null);
   const [eu,setEU]=useState(null); const [uf,setUF]=useState({name:"",role:"manager",pin:""});
@@ -1859,6 +2240,10 @@ function SettingsTab({settings,setSettings,items,setItems,liquor,setLiquor,purch
   const saveKey=()=>{LS.set("bh_apikey_v6",apiKey);show("API key saved");};
   const [gClientId,setGClientId]=useState(()=>LS.get("bh_gclientid_v6",""));
   const saveGId=()=>{LS.set("bh_gclientid_v6",gClientId);show("Google Client ID saved");};
+  const [gAndroidId,setGAndroidId]=useState(()=>LS.get("bh_gclientid_android",""));
+  const saveGAndroidId=()=>{LS.set("bh_gclientid_android",gAndroidId);show("Android Client ID saved");};
+  const [gAndroidSecret,setGAndroidSecret]=useState(()=>LS.get("bh_gclientsecret_android",""));
+  const saveGAndroidSecret=()=>{LS.set("bh_gclientsecret_android",gAndroidSecret);show("Android Client Secret saved");};
 
   const saveUser=()=>{
     if(!uf.name.trim())return;
@@ -1870,6 +2255,68 @@ function SettingsTab({settings,setSettings,items,setItems,liquor,setLiquor,purch
   const clearData=type=>{
     if(type==="food")setItems([]);else if(type==="bar")setLiquor([]);else if(type==="purch")setPurch([]);else if(type==="waste")setWaste([]);else if(type==="snaps")setSnaps([]);else if(type==="scans")setScans([]);else if(type==="recipes")setRecipes([]);else if(type==="prices")setPH([]);else if(type==="walks")setWalks(DEFAULT_WALKS);else if(type==="all"){setItems([]);setLiquor([]);setPurch([]);setWaste([]);setSnaps([]);setScans([]);setRecipes([]);setPH([]);setWalks(DEFAULT_WALKS);}
     show("Cleared");setCC(null);
+  };
+
+  const exportData=async()=>{
+    const payload=JSON.stringify({
+      _version:V, _exported:new Date().toISOString(),
+      items,purchases,walks,liquor,priceHist,scans,snaps,waste,recipes,settings,sales,bevSales,
+      apiKey:LS.get("bh_apikey_v6",""),
+      gClientId:LS.get("bh_gclientid_v6",""),
+      gAndroidId:LS.get("bh_gclientid_android",""),
+    },null,2);
+    const name=`beacon-hills-backup-${new Date().toISOString().slice(0,10)}.json`;
+
+    if(Capacitor.isNativePlatform()){
+      try{
+        const {Filesystem,Directory}=await import("@capacitor/filesystem");
+        const {Share}=await import("@capacitor/share");
+        // Write to cache directory, then share so Android shows the save dialog
+        await Filesystem.writeFile({path:name,data:payload,directory:Directory.Cache,encoding:"utf8"});
+        const {uri}=await Filesystem.getUri({path:name,directory:Directory.Cache});
+        await Share.share({title:"Beacon Hills Backup",url:uri,dialogTitle:"Save or share backup"});
+      }catch(e){
+        if(e?.message?.includes("cancel")||e?.message?.includes("Cancel")||e?.name==="AbortError")return;
+        show("Share failed — check app permissions");
+      }
+      return;
+    }
+
+    // Web fallback
+    const a=Object.assign(document.createElement("a"),{href:URL.createObjectURL(new Blob([payload],{type:"application/json"})),download:name});
+    a.click(); URL.revokeObjectURL(a.href);
+    show("Backup downloaded");
+  };
+
+  const importData=e=>{
+    const f=e.target.files?.[0]; if(!f)return;
+    const r=new FileReader();
+    r.onload=ev=>{
+      try{
+        const d=JSON.parse(ev.target.result);
+        if(!d||typeof d!=="object"){show("Not a valid backup file");return;}
+        const num=(v,f=0)=>{const n=parseFloat(v);return isNaN(n)?f:n;};
+        const obj=x=>x&&typeof x==="object";
+        if(Array.isArray(d.items))setItems(d.items.filter(obj).map(i=>({...i,qty:num(i.qty),unitCost:num(i.unitCost),par:num(i.par)})));
+        if(Array.isArray(d.liquor))setLiquor(d.liquor.filter(obj).map(l=>({...l,qty:num(l.qty),unitCost:num(l.unitCost),par:num(l.par)})));
+        if(Array.isArray(d.purchases))setPurch(d.purchases.filter(obj).map(p=>({...p,amount:num(p.amount)})));
+        if(Array.isArray(d.waste))setWaste(d.waste.filter(obj).map(w=>({...w,qty:num(w.qty),cost:num(w.cost)})));
+        if(Array.isArray(d.walks))setWalks(d.walks);
+        if(Array.isArray(d.priceHist))setPH(d.priceHist);
+        if(Array.isArray(d.scans))setScans(d.scans);
+        if(Array.isArray(d.snaps))setSnaps(d.snaps);
+        if(Array.isArray(d.recipes))setRecipes(d.recipes);
+        if(obj(d.settings))setSettings({...DEFAULT_SETTINGS,...d.settings});
+        if(typeof d.sales!=="undefined")setSales(num(d.sales));
+        if(obj(d.bevSales))setBevSales(d.bevSales);
+        if(d.apiKey){LS.set("bh_apikey_v6",d.apiKey);setApiKey(d.apiKey);}
+        if(d.gClientId){LS.set("bh_gclientid_v6",d.gClientId);setGClientId(d.gClientId);}
+        if(d.gAndroidId){LS.set("bh_gclientid_android",d.gAndroidId);setGAndroidId(d.gAndroidId);}
+        show(`Backup restored (${new Date(d._exported||0).toLocaleDateString()})`);
+      }catch{show("Could not read backup file");}
+    };
+    r.readAsText(f);
+    e.target.value="";
   };
 
   return(<>
@@ -1896,6 +2343,24 @@ function SettingsTab({settings,setSettings,items,setItems,liquor,setLiquor,purch
           </div>
           {gClientId&&<div style={{fontFamily:mono,fontSize:10,color:C.green,marginTop:4}}>✓ Google Client ID configured</div>}
           <div style={{fontFamily:mono,fontSize:9,color:C.muted,marginTop:6,lineHeight:1.6}}>Get one free at console.cloud.google.com → APIs → Gmail API → OAuth 2.0 credentials. Add <strong style={{color:C.amber}}>https://2bigjohn.github.io</strong> as an authorized JS origin.</div>
+        </div>
+        <div style={{marginTop:8,paddingTop:12,borderTop:`1px solid ${C.border}`}}>
+          <div style={S.lbl}>ANDROID CLIENT ID (for Gmail on Android app)</div>
+          <div style={{display:"flex",gap:8,marginTop:4}}>
+            <input style={{...S.inp,flex:1,fontFamily:mono,fontSize:11}} value={gAndroidId} onChange={e=>setGAndroidId(e.target.value)} placeholder="000000000000-xxx.apps.googleusercontent.com"/>
+            <button style={{...S.btn("blue"),padding:"9px 16px"}} onClick={saveGAndroidId}>Save</button>
+          </div>
+          {gAndroidId&&<div style={{fontFamily:mono,fontSize:10,color:C.green,marginTop:4}}>✓ Android Client ID configured</div>}
+          <div style={{fontFamily:mono,fontSize:9,color:C.muted,marginTop:6,lineHeight:1.6}}>Create a <strong style={{color:C.amber}}>Desktop app</strong> type OAuth client in Google Cloud Console. No redirect URI needed.</div>
+        </div>
+        <div style={{marginTop:8,paddingTop:12,borderTop:`1px solid ${C.border}`}}>
+          <div style={S.lbl}>ANDROID CLIENT SECRET</div>
+          <div style={{display:"flex",gap:8,marginTop:4}}>
+            <input style={{...S.inp,flex:1,fontFamily:mono,fontSize:11}} type="password" value={gAndroidSecret} onChange={e=>setGAndroidSecret(e.target.value)} placeholder="GOCSPX-…"/>
+            <button style={{...S.btn("blue"),padding:"9px 16px"}} onClick={saveGAndroidSecret}>Save</button>
+          </div>
+          {gAndroidSecret&&<div style={{fontFamily:mono,fontSize:10,color:C.green,marginTop:4}}>✓ Client Secret configured</div>}
+          <div style={{fontFamily:mono,fontSize:9,color:C.muted,marginTop:6,lineHeight:1.6}}>From the same Desktop app client page — click <strong style={{color:C.amber}}>Download JSON</strong> or copy the secret directly from the credentials page.</div>
         </div>
       </div>
     </div>
@@ -1940,6 +2405,23 @@ function SettingsTab({settings,setSettings,items,setItems,liquor,setLiquor,purch
       ))}
       <div style={{padding:"10px 14px",fontFamily:mono,fontSize:10,color:C.muted,lineHeight:1.7}}>
         <strong style={{color:C.text}}>Admin</strong> — full access · <strong style={{color:C.blue}}>Manager</strong> — no settings · <strong style={{color:C.green}}>Counter</strong> — count/scan only
+      </div>
+    </div>)}
+    {role==="admin"&&(<div style={S.card}><div style={S.hd}><span style={S.title(C.green)}>Backup & Restore</span></div>
+      <div style={{padding:14,display:"grid",gap:10}}>
+        <div style={{fontFamily:mono,fontSize:10,color:C.muted,lineHeight:1.7}}>Export all data to a JSON file for safekeeping or moving to another device. Import to restore a previous backup.</div>
+        <button style={{...S.btn("primary"),width:"100%",justifyContent:"center",padding:"11px"}} onClick={exportData}>
+          ↓ Export Backup
+        </button>
+        <label style={{...S.btn("secondary"),width:"100%",justifyContent:"center",padding:"11px",cursor:"pointer"}}>
+          ↑ Import Backup
+          <input type="file" accept=".json,application/json" style={{display:"none"}} onChange={importData}/>
+        </label>
+        {Capacitor.isNativePlatform()&&(
+          <div style={{fontFamily:mono,fontSize:9,color:C.muted,lineHeight:1.7,marginTop:4}}>
+            On Android all data is also automatically backed up to device storage and restored if the app's cache is ever cleared.
+          </div>
+        )}
       </div>
     </div>)}
     {role==="admin"&&(<div style={S.card}><div style={S.hd}><span style={S.title(C.red)}>Clear Data</span></div>
